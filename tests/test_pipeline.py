@@ -51,6 +51,25 @@ def test_all_attempts_fail_returns_best(settings, parsed_query, plan_matching_vi
     assert "No attempt passed" in (result.run_dir / "final_report.md").read_text(encoding="utf-8")
 
 
+def test_gemini_down_during_verification_keeps_best_attempt(settings, parsed_query, plan_matching_vision):
+    from egig.llm import LLMError
+
+    def gemini_down(parts):
+        raise LLMError("Gemini is unavailable right now")
+
+    answers = [vlm_answer(fail=("shiba_inu.attr1",)), gemini_down]
+    orch, _ = make(settings, parsed_query, answers, plan_matching_vision)
+    result = orch.run("x", run_id="t_down")  # must not raise
+
+    assert len(result.reports) == 2  # stopped after the unverifiable attempt, did not burn attempt 3
+    second = result.reports[1]
+    assert second.vlm_error and not second.verdict.passed
+    vlm_results = [r for r in second.results if r.method.value == "vlm"]
+    assert vlm_results and all(r.status.value == "FAIL" and "NOT VERIFIED" in r.evidence for r in vlm_results)
+    assert result.best_index == 0 and result.final_image.exists()  # the checked attempt wins
+    assert "Gemini was unavailable" in (result.run_dir / "attempt_2" / "report.md").read_text(encoding="utf-8")
+
+
 def test_collage_backend_runs_the_whole_loop(settings, parsed_query, plan_matching_vision):
     orch, _ = make(settings, parsed_query, [vlm_answer()], plan_matching_vision, backend=CollageBackend())
     result = orch.run("x", run_id="t3")

@@ -33,6 +33,9 @@ def attempt_markdown(report: AttemptReport, record: GenerationRecord, spec: Cons
     ]
     if v.skipped:
         lines.append(f"4. {v.skipped} check(s) skipped (not counted)")
+    if report.vlm_error:
+        lines += ["", f"> **Gemini was unavailable**, so the VLM checks below are marked FAIL as *not verified* "
+                      f"(the image may be fine). Error: {_cell(report.vlm_error[:300])}"]
     lines += ["", "## Checks", "", "| Check | Severity | Method | Result | Conf. | Evidence |", "|---|---|---|---|---|---|"]
     for r in report.results:
         conf = f"{r.confidence:.2f}" if r.confidence is not None else ""

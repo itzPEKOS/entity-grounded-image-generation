@@ -17,6 +17,9 @@ class Settings:
     llm_min_interval_s: float = 4.5  # 60 / 4.5 = 13.3 calls per minute, under the ~15 RPM free tier
     llm_max_retries: int = 5
     llm_temperature: float = 0.2
+    # used when the main model is overloaded (503) or out of quota (429):
+    # "auto" = stable gemini-X-flash(-lite) models your key can list, "none" = off, or "model-a,model-b"
+    llm_fallback_models: str = "auto"
 
     # --- Pipeline ---
     output_dir: str = "outputs"

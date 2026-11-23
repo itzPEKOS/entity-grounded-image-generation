@@ -20,7 +20,7 @@ from PIL import Image, ImageDraw
 
 from ..config import Settings
 from ..geometry import center, contains_point, expand, iou, to_pixels, union_box
-from ..llm import LLM
+from ..llm import LLM, LLMError
 from ..schemas import (AttemptReport, Check, CheckKind, CheckResult, ConstraintSpec, Detection, EntitySpec,
                        Method, Severity, Status, Verdict, VlmVerdicts)
 from ..vision import RawDetection, VisionTools, cosine
@@ -158,14 +158,23 @@ class VerificationAgent:
             ref_similarity = self._ref_similarity(spec, crops)
 
         vlm_checks = [c for c in checks if c.method == Method.vlm]
+        vlm_error = ""
         if vlm_checks:
-            results.update(self._ask_vlm(spec, vlm_checks, image, crops))
+            try:
+                results.update(self._ask_vlm(spec, vlm_checks, image, crops))
+            except LLMError as err:
+                # Count as FAIL, not SKIP: a skipped check is left out of the verdict, so an image
+                # nobody looked at could otherwise PASS on the detector checks alone.
+                vlm_error = str(err)
+                print(f"[verifier] Gemini unavailable: {len(vlm_checks)} checks not verified")
+                for c in vlm_checks:
+                    results[c.id] = CheckResult.of(c, Status.failed, "NOT VERIFIED: Gemini was unavailable")
 
         ordered = [results[c.id] for c in checks]
         verdict = compute_verdict(ordered, self.s.major_pass_rate)
         draw_detections(image, spec, detections).save(out_dir / "detections.png")
         return AttemptReport(attempt=attempt, image_path=str(image_path), results=ordered, detections=detections,
-                             ref_similarity=ref_similarity, verdict=verdict)
+                             ref_similarity=ref_similarity, verdict=verdict, vlm_error=vlm_error)
 
     # ------------------------------------------------------------- detector part
     def _detector_result(self, c: Check, e: Optional[EntitySpec], assigned: Dict[str, List[RawDetection]]) -> CheckResult:

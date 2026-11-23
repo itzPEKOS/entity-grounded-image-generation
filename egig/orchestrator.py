@@ -114,6 +114,11 @@ class Orchestrator:
             if report.verdict.passed:
                 trace.log("Verifier", "Orchestrator", "PASS", report.verdict.explanation, report)
                 break
+            if report.vlm_error:  # no real feedback to repair from: keep what we have instead of crashing
+                trace.log("Verifier", "Orchestrator", "STOP (Gemini unavailable)", report.vlm_error[:200], report)
+                print("[run] Gemini is unavailable, so this attempt could not be checked; stopping and "
+                      "keeping the best attempt so far")
+                break
             if attempt == self.s.max_attempts:
                 trace.log("Verifier", "Orchestrator", "FAIL (no attempts left)", report.verdict.explanation, report)
                 break
@@ -166,7 +171,8 @@ def make_vision(settings: Settings) -> Optional[VisionTools]:
 def build_orchestrator(settings: Settings, llm: Optional[LLM] = None, backend: Optional[Backend] = None,
                        vision: Optional[VisionTools] = None, wiki: Optional[WikiClient] = None) -> Orchestrator:
     llm = llm or GeminiLLM(settings.gemini_api_key, settings.llm_model, settings.vlm_model,
-                           settings.llm_min_interval_s, settings.llm_max_retries, settings.llm_temperature)
+                           settings.llm_min_interval_s, settings.llm_max_retries, settings.llm_temperature,
+                           fallback_models=settings.llm_fallback_models)
     backend = backend or make_backend(settings)
     vision = vision if vision is not None else make_vision(settings)
     return Orchestrator(settings, llm, backend, vision, wiki)

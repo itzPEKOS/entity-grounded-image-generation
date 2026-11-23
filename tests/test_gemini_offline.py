@@ -13,9 +13,10 @@ from egig.llm import GeminiLLM, LLMError  # noqa: E402
 from egig.schemas import ParsedQuery, VisualProfile, VlmVerdicts  # noqa: E402
 
 
-def wire(monkeypatch, replies):
+def wire(monkeypatch, replies, fallback_models="none"):
     """`replies`: list of dicts (JSON answers) or exceptions, consumed in order."""
-    llm = GeminiLLM(api_key="test-key", model="gemini-test", vlm_model="gemini-vlm-test", min_interval_s=0)
+    llm = GeminiLLM(api_key="test-key", model="gemini-test", vlm_model="gemini-vlm-test", min_interval_s=0,
+                    fallback_models=fallback_models)
     sent = []
 
     def fake_request(http_method, path, request_dict, http_options=None):
@@ -71,3 +72,58 @@ def test_unknown_model_gives_a_helpful_error(monkeypatch):
     llm, _ = wire(monkeypatch, [missing])
     with pytest.raises(LLMError, match="doctor"):
         llm.generate_json(VisualProfile, ["x"], system="sys")
+
+
+PROFILE = {"summary": "s", "key_features": ["f"], "negative_traits": [], "confusables": [], "prompt_keywords": "k"}
+
+
+def overloaded():
+    return errors.ServerError(503, {"error": {"code": 503, "message": "The model is overloaded.", "status": "UNAVAILABLE"}})
+
+
+def models_called(sent):
+    return [path.split("models/")[1].split(":")[0] for path, _ in sent]
+
+
+def test_overloaded_model_falls_back_and_sticks(monkeypatch):
+    llm, sent = wire(monkeypatch, [overloaded(), overloaded(), overloaded(), PROFILE, PROFILE],
+                     fallback_models="gemini-backup")
+    out = llm.generate_json(VisualProfile, ["x"], system="sys")
+    assert out.key_features == ["f"]
+    # 3 tries on the main model (1 + 2 retries), then the fallback answers
+    assert models_called(sent) == ["gemini-test"] * 3 + ["gemini-backup"]
+    assert llm.last_model == "gemini-backup"
+    # next call goes straight to the fallback that worked (no more waiting on the busy model)
+    llm.generate_json(VisualProfile, ["y"], system="sys")
+    assert models_called(sent)[-1] == "gemini-backup" and len(sent) == 5
+
+
+def test_every_model_down_raises_llm_error(monkeypatch):
+    llm, sent = wire(monkeypatch, [overloaded() for _ in range(6)], fallback_models="gemini-backup")
+    with pytest.raises(LLMError, match="unavailable"):
+        llm.generate_json(VisualProfile, ["x"], system="sys")
+    assert len(sent) == 6  # 3 per model, then give up instead of retrying forever
+
+
+def test_missing_fallback_model_is_skipped(monkeypatch):
+    gone = errors.ClientError(404, {"error": {"code": 404, "message": "not found", "status": "NOT_FOUND"}})
+    llm, sent = wire(monkeypatch, [overloaded(), overloaded(), overloaded(), gone, PROFILE],
+                     fallback_models="gemini-gone,gemini-backup")
+    llm.generate_json(VisualProfile, ["x"], system="sys")
+    assert models_called(sent)[-2:] == ["gemini-gone", "gemini-backup"]
+
+
+def test_auto_fallback_picks_stable_flash_models(monkeypatch):
+    llm, _ = wire(monkeypatch, [], fallback_models="auto")
+    monkeypatch.setattr(llm, "list_models", lambda: [
+        "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.5-flash", "gemini-3.5-flash-lite",
+        "gemini-3.5-flash-preview-09", "gemini-3.5-pro", "gemini-2.5-flash-image", "text-embedding-004"])
+    assert llm.fallback_chain("gemini-3.5-flash-lite") == [
+        "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+
+
+def test_quota_429_switches_model_without_waiting(monkeypatch):
+    quota = errors.ClientError(429, {"error": {"code": 429, "message": "Resource exhausted", "status": "RESOURCE_EXHAUSTED"}})
+    llm, sent = wire(monkeypatch, [quota, PROFILE], fallback_models="gemini-backup")
+    llm.generate_json(VisualProfile, ["x"], system="sys")
+    assert models_called(sent) == ["gemini-test", "gemini-backup"]  # no 20 s retries on the main model
