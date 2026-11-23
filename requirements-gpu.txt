@@ -1,0 +1,5 @@
+# Kaggle / Colab GPU runtime (torch with CUDA is already installed there)
+-r requirements.txt
+transformers>=4.45
+diffusers>=0.32
+accelerate>=0.30
