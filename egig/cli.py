@@ -56,18 +56,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
             from .llm import GeminiLLM
 
-            llm = GeminiLLM(s.gemini_api_key, s.llm_model, s.vlm_model, min_interval_s=0)
+            llm = GeminiLLM(s.gemini_api_key, s.llm_model, s.vlm_model, min_interval_s=0,
+                            fallback_models=s.llm_fallback_models)
             names = [n for n in llm.list_models() if "gemini" in n and ("flash" in n or "lite" in n)]
             print("  models your key can use (flash/lite):", ", ".join(names) or "(none listed)")
+            print("  order tried when a model is busy:", " -> ".join(llm.fallback_chain(s.llm_model)))
 
             class Ping(BaseModel):
                 ok: bool
 
+            def answered(main: str) -> str:
+                return "OK" if llm.last_model == main else f"busy, answered by fallback {llm.last_model}"
+
             llm.generate_json(Ping, ["Reply with ok=true."], system="Return JSON.")
-            print(f"  LLM_MODEL={s.llm_model}: OK")
+            print(f"  LLM_MODEL={s.llm_model}: {answered(s.llm_model)}")
             if s.vlm_model != s.llm_model:
                 llm.generate_json(Ping, ["Reply with ok=true."], system="Return JSON.", vision=True)
-                print(f"  VLM_MODEL={s.vlm_model}: OK")
+                print(f"  VLM_MODEL={s.vlm_model}: {answered(s.vlm_model)}")
         except Exception as err:
             print(f"  FAILED: {err}")
             ok = False

@@ -231,6 +231,7 @@ class AttemptReport(BaseModel):
     ref_similarity: Dict[str, float] = Field(default_factory=dict)
     verdict: Verdict
     repair_notes: List[str] = Field(default_factory=list)
+    vlm_error: str = ""  # set when Gemini could not be reached, so the VLM checks were not verified
 
     def failed(self) -> List[CheckResult]:
         return [r for r in self.results if r.status == Status.failed]
