@@ -1,0 +1,4 @@
+# Optional on a laptop: Grounding DINO + CLIP on CPU (Agent 2 photo curation, Agent 4 detector checks).
+# CPU-only torch is much smaller:  pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.6
+transformers>=4.45
