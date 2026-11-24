@@ -68,6 +68,9 @@ def test_gemini_down_during_verification_keeps_best_attempt(settings, parsed_que
     assert vlm_results and all(r.status.value == "FAIL" and "NOT VERIFIED" in r.evidence for r in vlm_results)
     assert result.best_index == 0 and result.final_image.exists()  # the checked attempt wins
     assert "Gemini was unavailable" in (result.run_dir / "attempt_2" / "report.md").read_text(encoding="utf-8")
+    assert "NOT VERIFIED" in second.verdict.explanation
+    final = (result.run_dir / "final_report.md").read_text(encoding="utf-8")
+    assert "FAIL (not verified)" in final and "Gemini was unavailable" in final
 
 
 def test_collage_backend_runs_the_whole_loop(settings, parsed_query, plan_matching_vision):

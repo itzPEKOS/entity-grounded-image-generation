@@ -28,7 +28,6 @@ class Limits:
     control_max: float = 0.9
     max_extra_prompt: int = 6
     max_extra_negative: int = 6
-    hint_words: int = 12
 
 
 def _clip(v: float, lo: float, hi: float) -> float:
@@ -108,8 +107,7 @@ def repair(params: GenParams, report: AttemptReport, spec: ConstraintSpec, limit
             prompt(r.description.split(":", 1)[-1].strip(), why)
         elif r.kind == CheckKind.relation:
             prompt(r.description.split(":", 1)[-1].strip(), why)
-
-        if r.fix_hint:
-            hint = " ".join(r.fix_hint.split()[: limits.hint_words])
-            _add(new.extra_prompt, hint, limits.max_extra_prompt)
+        # r.fix_hint (Gemini's free-text advice) is NOT pasted into the prompt: it is a full sentence
+        # that got cut mid-way by the 75-token limit and repeated what the rules above already add.
+        # It stays in the report for people to read.
     return new

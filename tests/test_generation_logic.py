@@ -108,7 +108,7 @@ def test_attribute_failure_lowers_ip_scale_identity_failure_raises_it(parsed_que
     assert new.seed == 11
     assert new.ip_scale == {"shiba_inu": 0.45, "wat_arun": 0.75}  # 0.60-0.15 and 0.60+0.15
     assert new.emphasis == {"shiba_inu": 1}
-    assert new.extra_prompt[:2] == ["make the dog sit", "Shiba Inu sitting"]  # newest first
+    assert new.extra_prompt == ["Shiba Inu sitting"]  # rule-based phrase; Gemini's free-text hint is not pasted
     assert "golden chedi" in new.extra_negative
     assert any("ip_scale[shiba_inu] 0.60 -> 0.45" in n for n in new.notes)
     assert params.ip_scale["shiba_inu"] == 0.6  # original untouched

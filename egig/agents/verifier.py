@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 from PIL import Image, ImageDraw
 
 from ..config import Settings
-from ..geometry import center, contains_point, expand, iou, to_pixels, union_box
+from ..geometry import area, center, contains_point, expand, intersection, iou, to_pixels, union_box
 from ..llm import LLM, LLMError
 from ..schemas import (AttemptReport, Check, CheckKind, CheckResult, ConstraintSpec, Detection, EntitySpec,
                        Method, Severity, Status, Verdict, VlmVerdicts)
@@ -32,7 +32,8 @@ Return one verdict per check_id, using the check_id exactly as given.
 - passed: true only if the check is clearly satisfied in IMAGE A.
 - confidence: 0..1.
 - evidence: one short sentence about what you actually see.
-- fix_hint: if failed, a short instruction (max 15 words) telling the image generator what to change; else ""."""
+- fix_hint: if failed, a short instruction (max 15 words) telling the image generator what to change; else "".
+Also return `counts`: one entry per entity_id listed under "Counts", with how many you see."""
 
 
 # ------------------------------------------------------------------------- checks
@@ -87,12 +88,26 @@ def compute_verdict(results: List[CheckResult], major_pass_rate: float) -> Verdi
                    skipped=sum(r.status == Status.skipped for r in results), explanation=explanation)
 
 
-def score_tuple(report: AttemptReport) -> Tuple[float, float, float]:
-    """For picking the best attempt when none passes."""
+REQUEST_KINDS = (CheckKind.count, CheckKind.attribute, CheckKind.relation, CheckKind.scene)
+
+
+def score_tuple(report: AttemptReport) -> Tuple[float, float, float, float, float]:
+    """For picking the best attempt when none passes, in this order:
+    1. share of critical checks passed
+    2. share of the user's explicit requests passed (count, attributes, relations, scene)
+    3. share of major checks passed
+    4. mean confidence on the passed requests (Gemini's certainty)
+    5. CLIP similarity to the reference photos (looks like the real thing; last, because a
+       photo-like copy of the reference can score high while ignoring the request)."""
     v = report.verdict
     crit = v.critical_passed / v.critical_total if v.critical_total else 1.0
+    req = [r for r in report.results if r.kind in REQUEST_KINDS and r.status != Status.skipped]
+    req_ok = [r for r in req if r.status == Status.passed]
+    req_rate = len(req_ok) / len(req) if req else 1.0
+    confs = [r.confidence for r in req_ok if r.confidence is not None]
     sims = list(report.ref_similarity.values())
-    return (crit, v.major_rate, sum(sims) / len(sims) if sims else 0.0)
+    return (crit, req_rate, v.major_rate, sum(confs) / len(confs) if confs else 0.0,
+            sum(sims) / len(sims) if sims else 0.0)
 
 
 # --------------------------------------------------------------------- detections
@@ -100,6 +115,19 @@ def entity_extent(e: EntitySpec, dets: List[RawDetection]) -> List[float]:
     """Where the entity is: a rigid landmark is often detected as several parts (each tower of
     a temple), so use the union of its boxes; for anything else use the best box."""
     return union_box([d.box for d in dets]) if e.rigid else dets[0].box
+
+
+def drop_group_boxes(dets: List[RawDetection], inside: float = 0.85) -> List[RawDetection]:
+    """Grounding DINO often adds one big box around a whole group ("the penguins") on top of the
+    individual boxes. A box that contains two or more smaller boxes is that group box: drop it,
+    otherwise three penguins are counted as four."""
+    keep = []
+    for d in dets:
+        inner = sum(1 for o in dets if o is not d and area(o.box) < area(d.box)
+                    and area(intersection(o.box, d.box)) >= inside * area(o.box))
+        if inner < 2:
+            keep.append(d)
+    return keep
 
 
 def assign_detections(entities: List[EntitySpec], raw: Dict[str, List[RawDetection]]) -> Dict[str, List[RawDetection]]:
@@ -140,28 +168,39 @@ class VerificationAgent:
         ref_similarity: Dict[str, float] = {}
         det_checks = [c for c in checks if c.method == Method.detector]
 
-        if self.vision is None:
-            for c in det_checks:
-                results[c.id] = CheckResult.of(c, Status.skipped, "detector not available (install torch + transformers)")
-        else:
-            labels = sorted({e.detection_label for e in spec.entities})
-            raw = {label: self.vision.detect(image, label) for label in labels}
-            assigned = assign_detections(spec.entities, raw)
+        sure: Dict[str, List[RawDetection]] = {e.id: [] for e in spec.entities}  # score >= box_threshold
+        loose: Dict[str, List[RawDetection]] = {e.id: [] for e in spec.entities}  # score >= box_threshold_low
+        if self.vision is not None:
+            # one detector pass at the low threshold; the normal threshold is a filter on top
+            # how many things each label should find: group boxes only matter when it is more than one
+            # (a single temple is legitimately one big box around its towers)
+            expected: Dict[str, int] = defaultdict(int)
             for e in spec.entities:
-                dets = assigned[e.id]
-                detections += [Detection(entity_id=e.id, label=d.label, score=round(d.score, 3),
-                                         box=[round(v, 3) for v in d.box]) for d in dets]
+                expected[e.detection_label] += e.count
+            raw_loose = {}
+            for label, n in sorted(expected.items()):
+                dets = self.vision.detect(image, label, box_threshold=self.s.box_threshold_low)
+                raw_loose[label] = drop_group_boxes(dets) if n > 1 else dets
+            raw_sure = {label: [d for d in dets if d.score >= self.s.box_threshold] for label, dets in raw_loose.items()}
+            sure = assign_detections(spec.entities, raw_sure)
+            loose = assign_detections(spec.entities, raw_loose)
+            for e in spec.entities:
+                for d in loose[e.id]:
+                    detections.append(Detection(entity_id=e.id, label=d.label, score=round(d.score, 3),
+                                                box=[round(v, 3) for v in d.box],
+                                                low_confidence=d.score < self.s.box_threshold))
+                dets = sure[e.id] or loose[e.id]
                 if dets:
                     crops[e.id] = image.crop(to_pixels(expand(entity_extent(e, dets), 0.03), image.width, image.height))
-            for c in det_checks:
-                results[c.id] = self._detector_result(c, spec.entity(c.entity_id), assigned)
             ref_similarity = self._ref_similarity(spec, crops)
 
         vlm_checks = [c for c in checks if c.method == Method.vlm]
         vlm_error = ""
+        vlm_counts: Dict[str, int] = {}
         if vlm_checks:
             try:
-                results.update(self._ask_vlm(spec, vlm_checks, image, crops))
+                vlm_results, vlm_counts = self._ask_vlm(spec, vlm_checks, image, crops)
+                results.update(vlm_results)
             except LLMError as err:
                 # Count as FAIL, not SKIP: a skipped check is left out of the verdict, so an image
                 # nobody looked at could otherwise PASS on the detector checks alone.
@@ -170,27 +209,43 @@ class VerificationAgent:
                 for c in vlm_checks:
                     results[c.id] = CheckResult.of(c, Status.failed, "NOT VERIFIED: Gemini was unavailable")
 
+        # detector checks last, so a count can use Gemini's count as a second opinion
+        for c in det_checks:
+            if self.vision is None:
+                results[c.id] = CheckResult.of(c, Status.skipped, "detector not available (install torch + transformers)")
+            else:
+                results[c.id] = self._detector_result(c, spec.entity(c.entity_id), sure, loose, vlm_counts)
+
         ordered = [results[c.id] for c in checks]
         verdict = compute_verdict(ordered, self.s.major_pass_rate)
+        if vlm_error:
+            verdict.explanation += f" [Gemini unavailable: {len(vlm_checks)} checks NOT VERIFIED]"
         draw_detections(image, spec, detections).save(out_dir / "detections.png")
         return AttemptReport(attempt=attempt, image_path=str(image_path), results=ordered, detections=detections,
-                             ref_similarity=ref_similarity, verdict=verdict, vlm_error=vlm_error)
+                             ref_similarity=ref_similarity, verdict=verdict, vlm_error=vlm_error,
+                             vlm_counts=vlm_counts)
 
     # ------------------------------------------------------------- detector part
-    def _detector_result(self, c: Check, e: Optional[EntitySpec], assigned: Dict[str, List[RawDetection]]) -> CheckResult:
+    def _detector_result(self, c: Check, e: Optional[EntitySpec], sure: Dict[str, List[RawDetection]],
+                         loose: Dict[str, List[RawDetection]], vlm_counts: Dict[str, int]) -> CheckResult:
         assert e is not None
-        dets = assigned[e.id]
+        hi, lo = self.s.box_threshold, self.s.box_threshold_low
         if c.kind == CheckKind.presence:
-            if dets:
-                return CheckResult.of(c, Status.passed, f"found '{e.detection_label}' (score {dets[0].score:.2f})",
-                                      confidence=dets[0].score)
-            return CheckResult.of(c, Status.failed, f"no '{e.detection_label}' above score {self.s.box_threshold}",
+            if sure[e.id]:
+                d = sure[e.id][0]
+                return CheckResult.of(c, Status.passed, f"found '{e.detection_label}' (score {d.score:.2f})",
+                                      confidence=d.score)
+            if loose[e.id]:
+                d = loose[e.id][0]
+                return CheckResult.of(c, Status.passed, f"found '{e.detection_label}' only with low confidence "
+                                      f"(score {d.score:.2f}, between {lo} and {hi})", confidence=d.score)
+            note = f"; Gemini counted {vlm_counts[e.id]}" if vlm_counts.get(e.id) else ""
+            return CheckResult.of(c, Status.failed, f"no '{e.detection_label}' above score {lo}{note}",
                                   fix_hint=f"make the {e.name} clearly visible")
         if c.kind == CheckKind.count:
-            ok = len(dets) == e.count
-            return CheckResult.of(c, Status.passed if ok else Status.failed,
-                                  f"found {len(dets)}, expected {e.count}")
+            return self._count_result(c, e, len(sure[e.id]), len(loose[e.id]), vlm_counts.get(e.id))
         # position
+        dets = sure[e.id] or loose[e.id]
         if not dets:
             return CheckResult.of(c, Status.failed, "entity not detected, so its position cannot match")
         extent = entity_extent(e, dets)
@@ -200,6 +255,33 @@ class VerificationAgent:
                     f"{[round(v, 2) for v in extent]} centre ({cx:.2f}, {cy:.2f}); "
                     f"planned {e.box} (+{self.s.position_margin} margin); IoU {iou(extent, e.box):.2f}")
         return CheckResult.of(c, Status.passed if ok else Status.failed, evidence)
+
+    def _count_result(self, c: Check, e: EntitySpec, n_sure: int, n_loose: int, n_vlm: Optional[int]) -> CheckResult:
+        """Cross-check the count.
+        - detector count at the normal threshold matches -> PASS
+        - detector is UNSURE (different counts at the two thresholds: overlapping or half-hidden
+          animals score low) -> Gemini's count decides
+        - detector is sure but Gemini disagrees -> FAIL, marked as CONFLICT in the evidence
+        - no Gemini count (unavailable) -> detector decides, as before"""
+        n = e.count
+        hi, lo = self.s.box_threshold, self.s.box_threshold_low
+        if n_sure == n:
+            return CheckResult.of(c, Status.passed, f"found {n_sure}, expected {n}")
+        detector = f"detector found {n_sure} at score >= {hi} and {n_loose} at >= {lo}"
+        if n_vlm is None:
+            return CheckResult.of(c, Status.failed, f"found {n_sure}, expected {n} ({detector}; no Gemini count)",
+                                  fix_hint=f"show exactly {n} {e.detection_label}s, clearly separated")
+        if n_sure != n_loose:
+            ok = n_vlm == n
+            return CheckResult.of(c, Status.passed if ok else Status.failed,
+                                  f"{detector} (unsure) -> used Gemini's count {n_vlm}, expected {n}",
+                                  confidence=0.6, fix_hint="" if ok else f"show exactly {n} {e.detection_label}s")
+        if n_vlm == n:
+            return CheckResult.of(c, Status.failed, f"CONFLICT: {detector}, but Gemini counted {n_vlm}; "
+                                  f"expected {n}. Counted as FAIL because the detector was consistent",
+                                  fix_hint=f"show exactly {n} {e.detection_label}s, clearly separated")
+        return CheckResult.of(c, Status.failed, f"found {n_sure}, expected {n} (Gemini counted {n_vlm})",
+                              fix_hint=f"show exactly {n} {e.detection_label}s, clearly separated")
 
     def _ref_similarity(self, spec: ConstraintSpec, crops: Dict[str, Image.Image]) -> Dict[str, float]:
         """CLIP cosine similarity between the generated crop and its reference crops (best of).
@@ -216,17 +298,23 @@ class VerificationAgent:
 
     # ------------------------------------------------------------------ VLM part
     def _ask_vlm(self, spec: ConstraintSpec, checks: List[Check], image: Image.Image,
-                 crops: Dict[str, Image.Image]) -> Dict[str, CheckResult]:
+                 crops: Dict[str, Image.Image]) -> Tuple[Dict[str, CheckResult], Dict[str, int]]:
         parts: list = [f"User request: {spec.prompt!r}", "IMAGE A (generated image to verify):", image]
         for e in spec.entities:
             if e.references:
                 parts += [f"REFERENCE photo of the real {e.name}:", Image.open(e.references[0].crop_path)]
             if e.id in crops:
                 parts += [f"CROP of IMAGE A where the {e.detection_label} ({e.name}) was detected:", crops[e.id]]
+        count_lines = "\n".join(f"- entity_id={e.id} | {e.name} ({e.detection_label})" for e in spec.entities)
+        parts.append("Counts: for each entity below, count how many are visible in IMAGE A, including partly "
+                     "hidden, small or blurry background ones. Count what you see; do not copy the number from "
+                     f"the request.\n{count_lines}")
         lines = "\n".join(f"- check_id={c.id} | {c.description}" for c in checks)
         parts.append(f"Checks:\n{lines}")
 
         reply = self.llm.generate_json(VlmVerdicts, parts, system=SYSTEM, vision=True)
+        known = {e.id for e in spec.entities}
+        counts = {k.entity_id.strip(): max(int(k.count), 0) for k in reply.counts if k.entity_id.strip() in known}
         by_id = {v.check_id.strip(): v for v in reply.verdicts}
         out: Dict[str, CheckResult] = {}
         for c in checks:
@@ -239,7 +327,7 @@ class VerificationAgent:
                 confidence=round(min(max(v.confidence, 0.0), 1.0), 3),
                 fix_hint="" if v.passed else v.fix_hint.strip(),
             )
-        return out
+        return out, counts
 
 
 def draw_detections(image: Image.Image, spec: ConstraintSpec, detections: List[Detection]) -> Image.Image:
@@ -253,6 +341,7 @@ def draw_detections(image: Image.Image, spec: ConstraintSpec, detections: List[D
     for d in detections:
         color = colors.get(d.entity_id or "", (255, 255, 255))
         px = to_pixels(d.box, img.width, img.height)
-        draw.rectangle(px, outline=color, width=5)
-        draw.text((px[0] + 6, px[1] + 6), f"{d.entity_id} {d.score:.2f}", fill=color)
+        draw.rectangle(px, outline=color, width=2 if d.low_confidence else 5)  # thin = low confidence
+        draw.text((px[0] + 6, px[1] + 6), f"{d.entity_id} {d.score:.2f}{' (low)' if d.low_confidence else ''}",
+                  fill=color)
     return img
