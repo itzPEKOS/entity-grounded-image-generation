@@ -33,6 +33,11 @@ Return one verdict per check_id, using the check_id exactly as given.
 - confidence: 0..1.
 - evidence: one short sentence about what you actually see.
 - fix_hint: if failed, a short instruction (max 15 words) telling the image generator what to change; else "".
+- visible: false when the part a check is about cannot be seen at all (outside the image, cropped off,
+  hidden behind something), e.g. "curled tail" on a head-and-shoulders picture. Then passed=false.
+  A feature that IS visible but looks wrong is visible=true, passed=false.
+Actions, poses and relations must be visibly happening, not just plausible from the context:
+e.g. a dog standing next to a ball is not "playing with the ball"; a cup beside a saucer is not "on the saucer".
 Also return `counts`: one entry per entity_id listed under "Counts", with how many you see."""
 
 
@@ -49,6 +54,9 @@ def build_checks(spec: ConstraintSpec) -> List[Check]:
         if e.count > 1:
             add(f"{e.id}.count", e.id, CheckKind.count, Severity.critical, Method.detector,
                 f"{e.name}: exactly {e.count} x '{e.detection_label}'")
+        else:  # one asked for: extra copies are a defect, but the request is still there -> major
+            add(f"{e.id}.count", e.id, CheckKind.count, Severity.major, Method.detector,
+                f"{e.name}: only one (no extra copies), by Gemini's count")
         add(f"{e.id}.position", e.id, CheckKind.position, Severity.major, Method.detector,
             f"{e.name}: centre of the detected box lies inside the planned box {e.box}")
         if e.needs_reference and (e.references or e.profile):
@@ -59,8 +67,17 @@ def build_checks(spec: ConstraintSpec) -> List[Check]:
             add(f"{e.id}.attr{i}", e.id, CheckKind.attribute, Severity.critical, Method.vlm, f"{e.name}: {attr}")
         for i, feat in enumerate(e.profile.key_features if e.profile else [], 1):
             add(f"{e.id}.feat{i}", e.id, CheckKind.feature, Severity.major, Method.vlm, f"{e.name}: {feat}")
+    if spec.scene.setting.strip():
+        # major: Agent 1 sometimes infers the setting, and place names ("Chiang Rai") cannot be seen
+        add("scene.setting", None, CheckKind.scene, Severity.major, Method.vlm,
+            f"Scene: the place looks like {spec.scene.setting.strip()} (judge what is visible: landscape, "
+            f"vegetation, buildings; an exact place name cannot be confirmed)")
     for i, req in enumerate(spec.scene.requirements, 1):
         add(f"scene.{i}", None, CheckKind.scene, Severity.critical, Method.vlm, f"Scene: {req}")
+    add("image.integrity", None, CheckKind.integrity, Severity.critical, Method.vlm,
+        "Image: the whole image is one continuous scene. It is NOT shown as a framed picture, poster, "
+        "photo-inside-a-photo or collage, and has no border or panel around or across it "
+        "(ordinary frames hanging on a wall inside the scene are fine)")
     for i, rel in enumerate(spec.relations, 1):
         s, o = spec.entity(rel.subject), spec.entity(rel.object)
         if s and o:
@@ -265,6 +282,18 @@ class VerificationAgent:
         - no Gemini count (unavailable) -> detector decides, as before"""
         n = e.count
         hi, lo = self.s.box_threshold, self.s.box_threshold_low
+        if n == 1:
+            # one asked for: the detector often splits one landmark or train into several boxes, so
+            # only Gemini's count is used, to catch extra copies (two scooters when one was asked for)
+            if n_vlm is None:
+                return CheckResult.of(c, Status.skipped, "no Gemini count")
+            if n_vlm == 1:
+                return CheckResult.of(c, Status.passed, "Gemini counted 1")
+            if n_vlm == 0:
+                return CheckResult.of(c, Status.failed, f"Gemini counted 0 (detector found {n_sure})",
+                                      fix_hint=f"make the {e.name} clearly visible")
+            return CheckResult.of(c, Status.failed, f"Gemini counted {n_vlm}, only one was asked for",
+                                  fix_hint=f"show a single {e.detection_label}")
         if n_sure == n:
             return CheckResult.of(c, Status.passed, f"found {n_sure}, expected {n}")
         detector = f"detector found {n_sure} at score >= {hi} and {n_loose} at >= {lo}"
@@ -321,6 +350,11 @@ class VerificationAgent:
             v = by_id.get(c.id)
             if v is None:  # the VLM skipped it: count as failed rather than silently passing
                 out[c.id] = CheckResult.of(c, Status.failed, "VLM returned no verdict for this check")
+                continue
+            if c.kind == CheckKind.feature and not v.visible and not v.passed:
+                # a key feature that is simply not in view (no tail in a portrait) is not a mistake;
+                # user requests (attributes, identity, scene) still have to be visible
+                out[c.id] = CheckResult.of(c, Status.skipped, "not visible: " + v.evidence.strip())
                 continue
             out[c.id] = CheckResult.of(
                 c, Status.passed if v.passed else Status.failed, v.evidence.strip(),

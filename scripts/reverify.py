@@ -9,6 +9,7 @@ After changing the parser (Agent 1), retriever (Agent 2) or generator (Agent 3),
 --reuse-vlm      reuse Gemini's saved answers; only the detector and the decision rules run again
                  (no Gemini calls, same answers every time: right for thresholds and count rules)
 --saved-checks   use the checks saved in 03_checks.json instead of building them with the current code
+--resume         keep reports already in --out that Gemini answered; redo only the missing / NOT VERIFIED ones
 --offline        load Grounding DINO / CLIP from the local cache only (much faster when the Hub is slow or blocked)
 
 CPU speed: about 1 minute per image, so 15 prompts x 3 attempts is roughly 45-60 minutes.
@@ -46,6 +47,7 @@ def main() -> int:
     ap.add_argument("--only", default="", help="comma-separated run ids")
     ap.add_argument("--env", type=Path, default=None, help=".env file with GEMINI_API_KEY (default: ./.env)")
     ap.add_argument("--offline", action="store_true")
+    ap.add_argument("--resume", action="store_true")
     args = ap.parse_args()
     if args.offline:
         import os
@@ -86,7 +88,7 @@ def main() -> int:
     for d in run_dirs:
         old = load_run(d)
         print(f"[reverify] {d.name}: {len(old.reports)} attempt(s)")
-        new = reverify_run(d, args.out / d.name, verifier, saved_checks=args.saved_checks)
+        new = reverify_run(d, args.out / d.name, verifier, saved_checks=args.saved_checks, resume=args.resume)
         o = replay_loop(old.reports, settings.max_attempts) if old.reports else {}
         n = replay_loop(new.reports, settings.max_attempts)
         per_attempt = " ".join(
@@ -106,7 +108,11 @@ def main() -> int:
     for r in rows:
         print(f"{r['id']:<24} {r['old_status']:>12} -> {r['new_status']:<12} {r['changed'] and 'CHANGED':<8} "
               f"{r['needs_gpu_rerun'] and 'needs GPU rerun':<16} {r['attempts old>new']}")
+    unverified = sum(1 for d in run_dirs for f in (args.out / d.name).glob("attempt_*/report.json")
+                     if '"vlm_error": ""' not in f.read_text(encoding="utf-8"))
     print(f"\nGemini calls: {llm.calls} (reused saved answers for {verifier.reused} image(s))")
+    if unverified:
+        print(f"{unverified} image(s) NOT VERIFIED (Gemini down): run again later with --resume")
     print(f"wrote {args.out / 'reverify_summary.csv'}")
     print("needs GPU rerun = with the new verdicts the loop would have made another attempt that was never generated")
     return 0

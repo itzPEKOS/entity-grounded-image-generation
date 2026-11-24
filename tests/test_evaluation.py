@@ -185,3 +185,35 @@ def test_review_page_lists_every_attempt_image(saved_run, monkeypatch):
     assert "d02_shiba_watarun/attempt_2/image.png" in page
     assert "PASS" not in page and "not as requested" not in page  # the system's verdict is not shown
     assert "refs/" in page  # reference photos shown to the labeller
+
+
+def test_label_of_an_older_picture_is_ignored(saved_run, tmp_path):
+    """A prompt run again keeps its folder name and attempt numbers, but the pictures are new."""
+    from egig.evaluation import image_sig
+    sig = image_sig(saved_run / "attempt_1" / "image.png")
+    labels_csv = tmp_path / "labels.csv"
+    labels_csv.write_text("run_id,attempt,human,tags,note,labeler,image\n"
+                          f"d02_shiba_watarun,1,ok,,,me,{sig}\n"
+                          "d02_shiba_watarun,2,ok,,,me,0123456789\n", encoding="utf-8")
+    rows = compare([load_run(saved_run)], read_labels([labels_csv]), 3)
+    assert rows[0].attempts[0].label is not None  # same picture
+    assert rows[0].attempts[1].label is None  # judged some other picture
+
+
+def test_resume_redoes_only_the_images_gemini_could_not_check(saved_run, settings, plan_matching_vision, tmp_path):
+    out = tmp_path / "v2" / saved_run.name
+    calls = []
+
+    def flaky(parts):  # image 1 checked, image 2 hits a Gemini outage
+        calls.append(1)
+        if len(calls) == 2:
+            raise LLMError("503")
+        return vlm_answer()(parts)
+    down = FakeLLM({"VlmVerdicts": flaky})
+    first = reverify_run(saved_run, out, ReplayVerifier(down, plan_matching_vision, settings))
+    assert [bool(r.vlm_error) for r in first.reports] == [False, True]
+
+    up = FakeLLM({"VlmVerdicts": vlm_answer()})
+    second = reverify_run(saved_run, out, ReplayVerifier(up, plan_matching_vision, settings), resume=True)
+    assert up.calls == 1  # only image 2 asked again
+    assert not any(r.vlm_error for r in second.reports)

@@ -81,6 +81,9 @@ def repair(params: GenParams, report: AttemptReport, spec: ConstraintSpec, limit
             emphasize(e.id, why)
             bump_ip(e.id, +0.10, why)
             prompt(f"a clearly visible {e.name}", why)
+        elif r.kind == CheckKind.count and e and e.count == 1:
+            prompt(f"a single {e.detection_label}", why)
+            _add(new.extra_negative, f"two {e.detection_label}s", limits.max_extra_negative)
         elif r.kind == CheckKind.count and e:
             emphasize(e.id, why)
             prompt(f"exactly {e.count} {e.detection_label}s", why)
@@ -107,6 +110,12 @@ def repair(params: GenParams, report: AttemptReport, spec: ConstraintSpec, limit
             prompt(r.description.split(":", 1)[-1].strip(), why)
         elif r.kind == CheckKind.relation:
             prompt(r.description.split(":", 1)[-1].strip(), why)
+        elif r.kind == CheckKind.integrity:
+            # frames / panels come from hard-edged conditioning: follow the edges less, forbid frames
+            bump_control(-0.15, why + ": reference edges can turn into a frame or panel")
+            for neg in ("picture frame", "border", "poster", "collage"):
+                _add(new.extra_negative, neg, limits.max_extra_negative)
+            new.notes.append(f"negative += picture frame, border, poster, collage ({why})")
         # r.fix_hint (Gemini's free-text advice) is NOT pasted into the prompt: it is a full sentence
         # that got cut mid-way by the 75-token limit and repeated what the rules above already add.
         # It stays in the report for people to read.

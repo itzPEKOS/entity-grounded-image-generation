@@ -4,7 +4,7 @@ from PIL import Image
 from egig.agents.generator import TOKEN_BUDGET, _fit, build_negative, build_prompt
 from egig.agents.parser import normalize
 from egig.backends import estimate_tokens
-from egig.conditioning import control_image, fit_into_box, layer_masks
+from egig.conditioning import control_image, edge_fade, fit_into_box, layer_masks
 from egig.geometry import to_pixels
 from egig.repair import repair
 from egig.schemas import (AttemptReport, CheckKind, CheckResult, GenParams, Method, Severity, Status, Verdict,
@@ -53,7 +53,8 @@ def test_control_image_only_draws_rigid_entities_and_clears_foreground(parsed_qu
     ctrl = np.asarray(control_image(spec.entities, crops, 256, 256))[:, :, 0]
     assert ctrl.max() == 255  # temple edges are there
     x0, y0, x1, y1 = to_pixels(spec.entity("shiba_inu").box, 256, 256)
-    assert ctrl[y0:y1, x0:x1].max() == 0  # dog box cleared: the dog is free to take any pose
+    cx, cy, rx, ry = (x0 + x1) // 2, (y0 + y1) // 2, (x1 - x0) // 4, (y1 - y0) // 4
+    assert ctrl[cy - ry:cy + ry, cx - rx:cx + rx].max() == 0  # middle of the dog cleared: any pose is possible
     wx0, wy0, wx1, wy1 = to_pixels(spec.entity("wat_arun").box, 256, 256)
     outside = ctrl.copy()
     outside[wy0:wy1, wx0:wx1] = 0
@@ -120,3 +121,42 @@ def test_scene_failure_lowers_every_reference_and_scales_are_bounded(parsed_quer
     new = repair(params, report_with(("scene.1", None, CheckKind.scene, "Scene: at sunset", "")), spec)
     assert new.ip_scale == {"shiba_inu": 0.3, "wat_arun": 0.85}  # 0.32-0.05 clamped to the 0.30 floor
     assert new.extra_prompt == ["at sunset"]
+
+
+def test_control_image_has_no_rectangular_outline():
+    """Frames in the first dev-set run (Vespa, Wat Rong Khun): a reference photo pasted with hard
+    sides, and a foreground box cleared as a rectangle, came back as picture frames / posters."""
+    from egig.schemas import Category, EntitySpec
+    back = EntitySpec(id="bridge", name="bridge", category=Category.landmark, search_query="b",
+                      detection_label="bridge", count=1, attributes=[], box=[0.1, 0.1, 0.9, 0.7], layer=0,
+                      needs_reference=True, rigid=True)
+    front = EntitySpec(id="scooter", name="scooter", category=Category.vehicle, search_query="s",
+                       detection_label="scooter", count=1, attributes=[], box=[0.3, 0.4, 0.7, 0.95], layer=2,
+                       needs_reference=True, rigid=True)
+    busy = striped_image("bridge", (400, 300)).rotate(30)  # edges right up to the photo's sides
+    ctrl = np.asarray(control_image([back, front], {"bridge": busy, "scooter": busy}, 256, 256))[:, :, 0].astype(int)
+
+    # 1. no bright line along the left/right sides of the pasted bridge photo
+    x0, y0, x1, y1 = to_pixels(back.box, 256, 256)
+    fitted, (ox, oy) = fit_into_box(busy, (x0, y0, x1, y1))
+    assert ctrl[oy:oy + fitted.height, ox].max() < 40
+    assert ctrl[oy:oy + fitted.height, ox + fitted.width - 1].max() < 40
+    # 2. a soft oval was cleared for the scooter, not its whole box: the box corner keeps bridge edges
+    fx0, fy0 = to_pixels(front.box, 256, 256)[:2]
+    assert ctrl[fy0:fy0 + 10, fx0:fx0 + 10].max() > 0
+
+
+def test_edge_fade_is_one_in_the_middle_and_zero_at_the_sides():
+    f = edge_fade(100, 200)
+    assert f[50, 100] == 1.0 and f[0].max() < 0.05 and f[:, 0].max() < 0.05 and f[:, -1].max() < 0.05
+
+
+def test_frame_failure_lowers_control_and_forbids_frames(parsed_query):
+    spec = grounded_spec(parsed_query)
+    bad = CheckResult(check_id="image.integrity", kind=CheckKind.integrity, severity=Severity.critical,
+                      method=Method.vlm, description="Image: one continuous scene", status=Status.failed)
+    report = AttemptReport(attempt=1, image_path="x", results=[bad], verdict=Verdict(
+        passed=False, critical_passed=0, critical_total=1, major_passed=0, major_total=0, major_rate=1.0,
+        skipped=0, explanation=""))
+    new = repair(GenParams(seed=1, control_scale=0.5), report, spec)
+    assert new.control_scale == 0.35 and "picture frame" in new.extra_negative
