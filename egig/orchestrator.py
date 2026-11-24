@@ -57,6 +57,8 @@ class RunResult:
     records: List[GenerationRecord]
     best_index: int
     final_image: Path
+    llm_calls: int = 0  # Gemini calls made by this run only (the LLM's own counter keeps growing across runs)
+    seconds: float = 0.0
 
     @property
     def passed(self) -> bool:
@@ -79,6 +81,7 @@ class Orchestrator:
         run_dir.mkdir(parents=True, exist_ok=True)
         trace = Trace(run_dir / "trace.jsonl")
         started = time.monotonic()
+        calls_before = self.llm.calls
         print(f"[run] {run_dir}")
 
         trace.log("user", "QueryParser", "prompt", prompt)
@@ -129,12 +132,14 @@ class Orchestrator:
         best_index = max(range(len(reports)), key=lambda i: score_tuple(reports[i]))
         final_image = run_dir / "final.png"
         shutil.copyfile(records[best_index].image_path, final_image)
+        calls = self.llm.calls - calls_before
         (run_dir / "final_report.md").write_text(
-            final_markdown(spec, reports, records, best_index, self.llm.calls), encoding="utf-8")
-        print(f"[run] done in {time.monotonic() - started:.0f}s: "
+            final_markdown(spec, reports, records, best_index, calls), encoding="utf-8")
+        seconds = time.monotonic() - started
+        print(f"[run] done in {seconds:.0f}s: "
               f"{'PASS' if reports[best_index].verdict.passed else 'FAIL'} (best = attempt {best_index + 1}), "
-              f"Gemini calls: {self.llm.calls}")
-        return RunResult(run_dir, spec, reports, records, best_index, final_image)
+              f"Gemini calls: {calls}")
+        return RunResult(run_dir, spec, reports, records, best_index, final_image, calls, seconds)
 
 
 def _save(path: Path, model: BaseModel) -> None:

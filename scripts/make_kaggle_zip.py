@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-INCLUDE = ["egig", "tests", "kaggle", "scripts", "README.md", "pyproject.toml", ".env.example",
+INCLUDE = ["egig", "eval", "tests", "kaggle", "scripts", "README.md", "pyproject.toml", ".env.example",
            "requirements.txt", "requirements-vision.txt", "requirements-gpu.txt"]
 
 
