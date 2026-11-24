@@ -121,3 +121,89 @@ def test_without_detector_detector_checks_are_skipped(parsed_query, settings, tm
     skipped = {r.check_id for r in report.results if r.status == Status.skipped}
     assert skipped == {"wat_arun.presence", "wat_arun.position", "shiba_inu.presence", "shiba_inu.position"}
     assert report.verdict.passed
+
+
+# ------------------------------------------------- count cross-check (penguin runs)
+from egig.agents.verifier import drop_group_boxes, score_tuple  # noqa: E402
+from egig.schemas import AttemptReport, Verdict, VlmCount  # noqa: E402
+
+LEFT, MID, RIGHT = [0.1, 0.4, 0.35, 0.95], [0.38, 0.4, 0.62, 0.95], [0.65, 0.4, 0.9, 0.95]
+
+
+def penguin_spec(parsed_query):
+    spec = normalize("Three penguins standing in a row", parsed_query)
+    p = spec.entity("shiba_inu")
+    p.count, p.detection_label, p.attributes = 3, "penguin", ["in a row"]
+    p.box, p.profile, p.references = [0.05, 0.35, 0.95, 0.98], None, []
+    spec.entities, spec.relations, spec.scene.requirements = [p], [], []
+    return spec
+
+
+def verify_penguins(parsed_query, settings, tmp_path, boxes, gemini_count):
+    spec = penguin_spec(parsed_query)
+
+    def answer(parts):
+        reply = vlm_answer()(parts)
+        if gemini_count is not None:
+            reply.counts = [VlmCount(entity_id="shiba_inu", count=gemini_count)]
+        return reply
+
+    agent = VerificationAgent(FakeLLM({"VlmVerdicts": answer}), FakeVision({"penguin": boxes}), settings)
+    image = tmp_path / "img.png"
+    Image.new("RGB", (64, 64)).save(image)
+    report = agent.run(spec, build_checks(spec), image, 1, tmp_path)
+    return report, {r.check_id: r for r in report.results}
+
+
+def test_count_unsure_detector_uses_gemini_count(parsed_query, settings, tmp_path):
+    # like attempt 3: three penguins in a row, the two behind score below 0.35
+    report, r = verify_penguins(parsed_query, settings, tmp_path,
+                                [(0.44, LEFT), (0.31, MID), (0.27, RIGHT)], gemini_count=3)
+    assert r["shiba_inu.count"].status == Status.passed
+    assert "used Gemini's count 3" in r["shiba_inu.count"].evidence
+    assert report.verdict.passed and report.vlm_counts == {"shiba_inu": 3}
+    assert sum(d.low_confidence for d in report.detections) == 2
+
+
+def test_count_unsure_detector_and_gemini_sees_four(parsed_query, settings, tmp_path):
+    # like attempt 2: two big penguins + blurry ones behind; Gemini counts 4
+    _, r = verify_penguins(parsed_query, settings, tmp_path,
+                           [(0.41, LEFT), (0.35, RIGHT), (0.27, MID)], gemini_count=4)
+    assert r["shiba_inu.count"].status == Status.failed
+
+
+def test_count_conflict_when_detector_is_consistent(parsed_query, settings, tmp_path):
+    _, r = verify_penguins(parsed_query, settings, tmp_path, [(0.44, LEFT)], gemini_count=3)
+    assert r["shiba_inu.count"].status == Status.failed and "CONFLICT" in r["shiba_inu.count"].evidence
+
+
+def test_count_without_gemini_falls_back_to_detector(parsed_query, settings, tmp_path):
+    _, r = verify_penguins(parsed_query, settings, tmp_path,
+                           [(0.44, LEFT), (0.31, MID), (0.27, RIGHT)], gemini_count=None)
+    assert r["shiba_inu.count"].status == Status.failed and "no Gemini count" in r["shiba_inu.count"].evidence
+
+
+def test_presence_passes_with_low_confidence_box(parsed_query, settings, tmp_path):
+    _, r = verify_penguins(parsed_query, settings, tmp_path, [(0.29, MID)], gemini_count=1)
+    assert r["shiba_inu.presence"].status == Status.passed and "low confidence" in r["shiba_inu.presence"].evidence
+
+
+def test_group_box_around_all_penguins_is_dropped(parsed_query, settings, tmp_path):
+    group = RawDetection(label="penguin", score=0.5, box=[0.05, 0.35, 0.95, 0.97])
+    singles = [RawDetection(label="penguin", score=0.45, box=b) for b in (LEFT, MID, RIGHT)]
+    assert drop_group_boxes([group] + singles) == singles
+    _, r = verify_penguins(parsed_query, settings, tmp_path,
+                           [(0.5, group.box), (0.45, LEFT), (0.45, MID), (0.45, RIGHT)], gemini_count=3)
+    assert r["shiba_inu.count"].evidence == "found 3, expected 3"
+
+
+def test_best_attempt_prefers_the_request_over_clip_similarity():
+    def rep(attempt, attr_conf, clip):
+        res = [CheckResult(check_id="p.attr1", kind=CheckKind.attribute, severity=Severity.critical,
+                           method=Method.vlm, description="", status=Status.passed, confidence=attr_conf)]
+        v = Verdict(passed=False, critical_passed=4, critical_total=5, major_passed=5, major_total=5,
+                    major_rate=1.0, skipped=0, explanation="")
+        return AttemptReport(attempt=attempt, image_path="x", results=res, verdict=v, ref_similarity={"p": clip})
+    # penguin run: attempt 1 looked more like the reference (CLIP 0.767) but was less clearly "in a row"
+    one, three = rep(1, 0.90, 0.767), rep(3, 1.00, 0.691)
+    assert max([one, three], key=score_tuple) is three

@@ -46,10 +46,15 @@ def attempt_markdown(report: AttemptReport, record: GenerationRecord, spec: Cons
         lines += [f"- {k}: {s:.3f}" for k, s in report.ref_similarity.items()]
     if report.detections:
         lines += ["", "## Detections (Grounding DINO)", ""]
-        lines += [f"- {d.entity_id}: '{d.label}' score {d.score:.2f} box {d.box}" for d in report.detections]
+        lines += [f"- {d.entity_id}: '{d.label}' score {d.score:.2f} box {d.box}"
+                  f"{' (low confidence)' if d.low_confidence else ''}" for d in report.detections]
+    if report.vlm_counts:
+        lines += ["", "## Gemini's own count (second opinion for count checks)", ""]
+        lines += [f"- {k}: {n}" for k, n in report.vlm_counts.items()]
     failed = report.failed()
     if failed:
-        lines += ["", "## Sent back to the generator (fix hints)", ""]
+        lines += ["", "## Failed checks: advice from the verifier (for people; the generator acts on the check "
+                      "type, see the repair log of the next attempt)", ""]
         lines += [f"- `{r.check_id}`: {_cell(r.fix_hint or r.evidence)}" for r in failed]
     if record.params.notes:
         lines += ["", "## What the generator changed for this attempt (repair log)", ""]
@@ -70,9 +75,16 @@ def final_markdown(spec: ConstraintSpec, reports: List[AttemptReport], records: 
     ]
     for rep, rec in zip(reports, records):
         v = rep.verdict
-        lines.append(f"| {rep.attempt} | {'PASS' if v.passed else 'FAIL'} | {v.critical_passed}/{v.critical_total} | "
+        verdict = "PASS" if v.passed else ("FAIL (not verified)" if rep.vlm_error else "FAIL")
+        lines.append(f"| {rep.attempt} | {verdict} | {v.critical_passed}/{v.critical_total} | "
                      f"{v.major_passed}/{v.major_total} ({v.major_rate:.0%}) | {rec.params.seed} | "
                      f"{rec.params.ip_scale} | {rec.params.control_scale:.2f} |")
+    unverified = [r.attempt for r in reports if r.vlm_error]
+    if unverified:
+        lines += ["", f"> **Gemini was unavailable** during verification of attempt(s) {unverified}, so their "
+                      "Gemini checks are counted as FAIL *without looking at the image*, and the loop stopped "
+                      "(repairing from checks nobody made would only waste GPU time). Run again later. "
+                      f"Error: {_cell(reports[-1].vlm_error[:300] if reports[-1].vlm_error else '')}"]
     if not best.verdict.passed:
         lines += ["", "No attempt passed; the best one is returned (most critical checks passed, "
                       "then highest major rate, then highest reference similarity)."]

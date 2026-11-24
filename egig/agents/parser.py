@@ -23,8 +23,10 @@ Entities
 - search_query: the exact English Wikipedia article title when you know it, disambiguated if the name is
   ambiguous (e.g. "Mercury (planet)", not "Mercury"); otherwise the canonical name.
 - rigid = true when the shape is fixed (landmarks, buildings, bridges, vehicles, statues); false for animals and people.
-- detection_label: a short generic lowercase noun an object detector knows: "dog", "cat", "temple", "tower",
-  "bridge", "car", "person", "bird". Never a proper name.
+- detection_label: the everyday lowercase name of the KIND of thing, as specific as an ordinary person
+  would say it, so an object detector recognises it well: "penguin" (not "bird") for an emperor penguin,
+  "owl" for a snowy owl, "parrot", "dog" for any dog breed, "cat", "temple", "tower", "bridge", "car",
+  "person". Never a proper name, a breed or a species name.
 - attributes: ONLY what the user explicitly asked for about that entity (pose, action, clothing, colour, size).
   Do not invent attributes. Empty list if none.
 - count: how many the user asked for (default 1).

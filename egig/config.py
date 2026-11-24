@@ -56,6 +56,9 @@ class Settings:
     gdino_model: str = "IDEA-Research/grounding-dino-tiny"
     clip_model: str = "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
     box_threshold: float = 0.35
+    # second look when the detector count does not match: boxes between this and box_threshold
+    # count as "low confidence", and Gemini's count breaks the tie
+    box_threshold_low: float = 0.25
     text_threshold: float = 0.25
     ref_box_threshold: float = 0.30
     position_margin: float = 0.10

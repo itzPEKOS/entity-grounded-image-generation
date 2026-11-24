@@ -210,6 +210,7 @@ class Detection(BaseModel):
     label: str
     score: float
     box: List[float]  # normalized [x0, y0, x1, y1]
+    low_confidence: bool = False  # only found with the lower threshold (box_threshold_low)
 
 
 class Verdict(BaseModel):
@@ -232,6 +233,7 @@ class AttemptReport(BaseModel):
     verdict: Verdict
     repair_notes: List[str] = Field(default_factory=list)
     vlm_error: str = ""  # set when Gemini could not be reached, so the VLM checks were not verified
+    vlm_counts: Dict[str, int] = Field(default_factory=dict)  # Gemini's own count per entity (second opinion)
 
     def failed(self) -> List[CheckResult]:
         return [r for r in self.results if r.status == Status.failed]
@@ -245,8 +247,14 @@ class VlmVerdict(BaseModel):
     fix_hint: str = Field(description="If failed: short instruction for the image generator; else empty")
 
 
+class VlmCount(BaseModel):
+    entity_id: str
+    count: int = Field(description="How many of this entity are visible in IMAGE A, including partly hidden ones")
+
+
 class VlmVerdicts(BaseModel):
     verdicts: List[VlmVerdict]
+    counts: List[VlmCount] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------------------
