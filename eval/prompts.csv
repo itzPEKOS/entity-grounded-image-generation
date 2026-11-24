@@ -1,0 +1,24 @@
+id,split,part,category,prompt
+d01_husky,dev,A,breed/place,A Siberian Husky running on a snowy field
+d02_shiba_watarun,dev,B,breed/place,A Shiba Inu sitting in front of Wat Arun at sunset
+d03_shiba_akita,dev,A,breed/place,"A Shiba Inu on the left and an Akita Inu on the right, sitting on a wooden porch"
+d04_vespa_goldengate,dev,B,colour+layers,A red Vespa scooter parked in front of the Golden Gate Bridge
+d05_mercury_mars,dev,A,ambiguous name,"Mercury and Mars side by side in space, Mercury on the left"
+d06_jaguar,dev,B,ambiguous name,A jaguar drinking from a river in the Amazon rainforest
+d07_macintosh_apples,dev,A,ambiguous name,An Apple Macintosh 128K on a desk next to a bowl of green apples
+d08_penguins,dev,B,count,Three emperor penguins standing in a row on ice
+d09_cat_dog_rabbit,dev,A,count/many animals,"A Bengal cat, a Golden Retriever and a Holland Lop rabbit sitting together on a sofa"
+d10_watrongkhun,dev,B,rare,Wat Rong Khun (the White Temple) in Chiang Rai at sunrise
+d11_shoebill,dev,A,rare,A shoebill stork standing in a swamp
+d12_korat_watarun,dev,B,hard (Thai + style),แมวโคราชนั่งอยู่หน้าวัดอรุณ สไตล์ภาพสีน้ำ
+d13_fuji_shinkansen,dev,B,hard (layers),"Mount Fuji in the background, a Shinkansen bullet train in the middle, cherry blossoms in the foreground"
+d14_blue_shiba,dev,A,hard (unusual colour),A blue Shiba Inu
+d15_coffeeshop,dev,A,edge (no entity),A cozy coffee shop interior on a rainy day
+h01_pisa,holdout,H,breed/place,The Leaning Tower of Pisa under a cloudy sky
+h02_owl_matterhorn,holdout,H,colour+layers,"A snowy owl perched on a branch, the Matterhorn in the background"
+h03_bigben_taxi,holdout,H,ambiguous name,Big Ben at night with a black London taxi in front
+h04_tuktuks,holdout,H,count,Two tuk-tuks parked in front of the Grand Palace in Bangkok
+h05_fiat_trevi,holdout,H,rare,A 1957 Fiat 500 parked next to the Trevi Fountain in Rome
+h06_axolotl_betta,holdout,H,rare,An axolotl in an aquarium next to a betta fish
+h07_eiffel_liberty,holdout,H,hard (two landmarks),The Eiffel Tower and the Statue of Liberty side by side
+h08_mercury,holdout,H,edge (ambiguous),Mercury
