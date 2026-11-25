@@ -149,6 +149,7 @@ class CheckKind(str, Enum):
     feature = "feature"
     scene = "scene"
     relation = "relation"
+    integrity = "integrity"  # the image as a whole: one continuous scene, not a framed picture / collage
 
 
 class Severity(str, Enum):
@@ -245,6 +246,8 @@ class VlmVerdict(BaseModel):
     confidence: float = Field(description="0 to 1")
     evidence: str = Field(description="One short sentence describing what is visible")
     fix_hint: str = Field(description="If failed: short instruction for the image generator; else empty")
+    visible: bool = Field(default=True, description="false when the part this check is about is outside the "
+                                                    "image or hidden, so it cannot be judged")
 
 
 class VlmCount(BaseModel):

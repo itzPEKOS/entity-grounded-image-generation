@@ -19,19 +19,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from egig.evaluation import TAGS, attempt_numbers, find_runs, load_run  # noqa: E402
+from egig.evaluation import TAGS, attempt_numbers, find_runs, image_sig, load_run  # noqa: E402
 
 
-def collect(root: Path) -> list:
+def collect(root: Path, only: set = frozenset()) -> list:
     data = []
     for d in find_runs(root):
+        if only and d.name not in only:
+            continue
         run = load_run(d)
         rel = lambda p: Path(p).resolve().relative_to(root.resolve()).as_posix()  # noqa: E731
         entities = []
         for e in run.spec.entities:
             refs = [rel(r.crop_path) for r in e.references if Path(r.crop_path).exists()]
             entities.append({"name": e.name, "count": e.count, "refs": refs})
-        attempts = [{"n": n, "img": rel(run.image(n))} for n in attempt_numbers(d)]
+        attempts = [{"n": n, "img": rel(run.image(n)), "sig": image_sig(run.image(n))} for n in attempt_numbers(d)]
         if attempts:
             data.append({"id": run.id, "prompt": run.prompt, "entities": entities, "attempts": attempts})
     return data
@@ -87,7 +89,7 @@ function render(){
     box.append(refs);
     const grid = el("div", {class: "attempts"});
     for (const a of run.attempts){
-      const k = run.id + "|" + a.n, lab = labels[k] || (labels[k] = {human: "", tags: [], note: ""});
+      const k = run.id + "|" + a.n + "|" + a.sig, lab = labels[k] || (labels[k] = {human: "", tags: [], note: ""});
       const card = el("div", {class: "att " + (lab.human || "")});
       const link = el("a", {href: a.img, target: "_blank"}, el("img", {src: a.img, loading: "lazy"}));
       const choice = el("div", {class: "choice"}, `Attempt ${a.n}:`);
@@ -107,9 +109,9 @@ function render(){
   progress(); }
 const q = s => /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 $("#export").onclick = () => {
-  const who = $("#labeler").value.trim(), rows = [["run_id", "attempt", "human", "tags", "note", "labeler"]];
-  for (const run of DATA) for (const a of run.attempts){ const l = labels[run.id + "|" + a.n] || {};
-    rows.push([run.id, String(a.n), l.human || "", (l.tags || []).join(";"), l.note || "", who]); }
+  const who = $("#labeler").value.trim(), rows = [["run_id", "attempt", "human", "tags", "note", "labeler", "image"]];
+  for (const run of DATA) for (const a of run.attempts){ const l = labels[run.id + "|" + a.n + "|" + a.sig] || {};
+    rows.push([run.id, String(a.n), l.human || "", (l.tags || []).join(";"), l.note || "", who, a.sig]); }
   const blob = new Blob(["﻿" + rows.map(r => r.map(q).join(",")).join("\n") + "\n"], {type: "text/csv"});
   const a = el("a", {href: URL.createObjectURL(blob), download: "labels.csv"}); document.body.append(a); a.click(); a.remove(); };
 function parseCSV(text){ const rows = []; let row = [], cur = "", inq = false;
@@ -120,10 +122,14 @@ function parseCSV(text){ const rows = []; let row = [], cur = "", inq = false;
   if (cur || row.length){ row.push(cur); rows.push(row); } return rows; }
 $("#imp").onchange = async e => { const f = e.target.files[0]; if (!f) return;
   const rows = parseCSV((await f.text()).replace(/^﻿/, "")), head = rows.shift(), ix = n => head.indexOf(n);
-  let n = 0; for (const r of rows){ if (!r[ix("run_id")] || !r[ix("human")]) continue;
-    labels[r[ix("run_id")] + "|" + r[ix("attempt")]] = {human: r[ix("human")],
+  const sigs = {}; for (const run of DATA) for (const a of run.attempts) sigs[run.id + "|" + a.n] = a.sig;
+  let n = 0, stale = 0; for (const r of rows){ if (!r[ix("run_id")] || !r[ix("human")]) continue;
+    const at = r[ix("run_id")] + "|" + r[ix("attempt")], sig = ix("image") >= 0 ? r[ix("image")] : "";
+    if (!(at in sigs) || (sig && sig !== sigs[at])){ stale++; continue; }  // another picture: skip
+    labels[at + "|" + sigs[at]] = {human: r[ix("human")],
       tags: (r[ix("tags")] || "").split(";").filter(Boolean), note: r[ix("note")] || ""}; n++; }
-  save(); render(); alert(`Imported ${n} labels`); e.target.value = ""; };
+  save(); render(); alert(`Imported ${n} labels` + (stale ? `, skipped ${stale} for pictures that changed or are not on this page` : ""));
+  e.target.value = ""; };
 render();
 </script></body></html>
 """
@@ -132,15 +138,17 @@ render();
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("runs", type=Path, help="folder holding the run folders (e.g. outputs/eval_dev)")
+    ap.add_argument("--only", default="", help="comma-separated run ids (e.g. the prompts that were run again)")
+    ap.add_argument("--out", default="review.html", help="file name inside the runs folder")
     args = ap.parse_args()
-    data = collect(args.runs)
+    data = collect(args.runs, {s.strip() for s in args.only.split(",") if s.strip()})
     if not data:
         print(f"no runs with images under {args.runs}")
         return 1
     js = lambda v: json.dumps(v, ensure_ascii=False).replace("</", "<\\/")  # noqa: E731  (safe inside <script>)
     page = (PAGE.replace("__DATA__", js(data)).replace("__TAGS__", js(TAGS))
             .replace("__KEY__", js(args.runs.resolve().name)))
-    out = args.runs / "review.html"
+    out = args.runs / args.out
     out.write_text(page, encoding="utf-8")
     n = sum(len(r["attempts"]) for r in data)
     print(f"wrote {out}: {len(data)} prompts, {n} images to label")

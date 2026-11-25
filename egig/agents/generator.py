@@ -19,7 +19,8 @@ from ..repair import repair
 from ..schemas import AttemptReport, ConstraintSpec, GenerationRecord, GenParams
 
 TOKEN_BUDGET = 75  # CLIP reads 77 tokens including the start and end tokens
-BASE_NEGATIVE = ["blurry", "low quality", "deformed", "distorted", "watermark", "text", "extra limbs"]
+BASE_NEGATIVE = ["blurry", "low quality", "deformed", "distorted", "watermark", "text", "extra limbs",
+                 "picture frame, border"]
 QUALITY = "highly detailed, sharp focus"
 
 

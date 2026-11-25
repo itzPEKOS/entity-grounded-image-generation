@@ -23,11 +23,15 @@ def spec_with_profiles(parsed_query):
 def test_build_checks(parsed_query):
     checks = build_checks(spec_with_profiles(parsed_query))
     ids = [c.id for c in checks]
-    # wat_arun: presence, position, identity, 4 features = 7; shiba: presence, position, identity, attr1, 3 features = 7
-    # + scene.1 + relation.1 = 16
-    assert len(ids) == 16
+    # wat_arun: presence, count, position, identity, 4 features = 8
+    # shiba: presence, count, position, identity, attr1, 3 features = 8
+    # + scene.setting + scene.1 + image.integrity + relation.1 = 20
+    assert len(ids) == 20
     assert "shiba_inu.attr1" in ids and "scene.1" in ids and "relation.1" in ids
     sev = {c.id: c.severity for c in checks}
+    assert sev["image.integrity"] == Severity.critical  # a framed picture is not the scene that was asked for
+    assert sev["scene.setting"] == Severity.major  # often inferred by Agent 1, place names cannot be seen
+    assert sev["shiba_inu.count"] == Severity.major  # one asked for: an extra copy is a defect, not a miss
     assert sev["shiba_inu.attr1"] == Severity.critical and sev["wat_arun.feat2"] == Severity.major
     assert sev["shiba_inu.position"] == Severity.major
 
@@ -119,7 +123,8 @@ def test_without_detector_detector_checks_are_skipped(parsed_query, settings, tm
     report = VerificationAgent(FakeLLM({"VlmVerdicts": vlm_answer()}), None, settings).run(
         spec, build_checks(spec), img_path, 1, tmp_path)
     skipped = {r.check_id for r in report.results if r.status == Status.skipped}
-    assert skipped == {"wat_arun.presence", "wat_arun.position", "shiba_inu.presence", "shiba_inu.position"}
+    assert skipped == {"wat_arun.presence", "wat_arun.position", "shiba_inu.presence", "shiba_inu.position",
+                       "wat_arun.count", "shiba_inu.count"}
     assert report.verdict.passed
 
 
@@ -207,3 +212,80 @@ def test_best_attempt_prefers_the_request_over_clip_similarity():
     # penguin run: attempt 1 looked more like the reference (CLIP 0.767) but was less clearly "in a row"
     one, three = rep(1, 0.90, 0.767), rep(3, 1.00, 0.691)
     assert max([one, three], key=score_tuple) is three
+
+
+# ------------------------------------------------- fixes from the first dev-set evaluation (24 Nov)
+def verify_one(parsed_query, settings, tmp_path, answer):
+    spec = spec_with_profiles(parsed_query)
+    agent = VerificationAgent(FakeLLM({"VlmVerdicts": answer}), FakeVision({
+        "temple": [(0.8, [0.12, 0.03, 0.88, 0.72])], "dog": [(0.8, [0.32, 0.48, 0.68, 0.98])]}), settings)
+    image = tmp_path / "img.png"
+    Image.new("RGB", (64, 64)).save(image)
+    report = agent.run(spec, build_checks(spec), image, 1, tmp_path)
+    return report, {r.check_id: r for r in report.results}
+
+
+def test_feature_that_is_not_in_view_is_skipped_not_failed(parsed_query, settings, tmp_path):
+    # blue Shiba portrait: "curled tail" cannot be judged on a head-and-shoulders picture
+    def answer(parts):
+        reply = vlm_answer()(parts)
+        for v in reply.verdicts:
+            if v.check_id in ("shiba_inu.feat2", "shiba_inu.attr1"):
+                v.passed, v.visible, v.evidence = False, False, "only the head is in the picture"
+        return reply
+    _, r = verify_one(parsed_query, settings, tmp_path, answer)
+    assert r["shiba_inu.feat2"].status == Status.skipped and r["shiba_inu.feat2"].evidence.startswith("not visible")
+    assert r["shiba_inu.attr1"].status == Status.failed  # what the user asked for must still be seen
+
+
+def test_one_asked_for_but_gemini_counts_two(parsed_query, settings, tmp_path):
+    # Vespa run: two scooters in the picture, one was asked for
+    def answer(parts):
+        reply = vlm_answer()(parts)
+        reply.counts = [VlmCount(entity_id="shiba_inu", count=2), VlmCount(entity_id="wat_arun", count=1)]
+        return reply
+    report, r = verify_one(parsed_query, settings, tmp_path, answer)
+    assert r["shiba_inu.count"].status == Status.failed and "only one" in r["shiba_inu.count"].evidence
+    assert r["wat_arun.count"].status == Status.passed
+    assert report.verdict.passed  # major: on its own it lowers the score but does not fail the image
+
+
+def test_framed_picture_fails_the_image(parsed_query, settings, tmp_path):
+    report, r = verify_one(parsed_query, settings, tmp_path, vlm_answer(fail=("image.integrity",)))
+    assert r["image.integrity"].status == Status.failed and not report.verdict.passed
+
+
+def test_presence_fails_when_gemini_counts_zero(parsed_query, settings, tmp_path):
+    # the detector put a box on "dog", but Gemini sees no dog (merged into another animal)
+    def answer(parts):
+        reply = vlm_answer()(parts)
+        reply.counts = [VlmCount(entity_id="shiba_inu", count=0), VlmCount(entity_id="wat_arun", count=1)]
+        return reply
+    report, r = verify_one(parsed_query, settings, tmp_path, answer)
+    assert r["shiba_inu.presence"].status == Status.failed
+    assert r["shiba_inu.presence"].evidence.startswith("Gemini counted 0; detector found 'dog'")
+    assert r["wat_arun.presence"].status == Status.passed and not report.verdict.passed
+
+
+def test_box_around_several_animals_does_not_prove_one_of_them(parsed_query, settings, tmp_path):
+    # cat + dog + rabbit run: "rabbit" was found as one box around the whole merged creature
+    spec = spec_with_profiles(parsed_query)
+    template = spec.entity("shiba_inu")
+    boxes = {"cat": [0.05, 0.45, 0.31, 0.95], "dog": [0.36, 0.45, 0.64, 0.95], "rabbit": [0.69, 0.45, 0.95, 0.95]}
+    spec.entities = [template.model_copy(update={"id": k, "name": k, "detection_label": k, "box": b})
+                     for k, b in boxes.items()]
+    spec.relations = []
+
+    def answer(parts):
+        reply = vlm_answer()(parts)
+        reply.counts = [VlmCount(entity_id=k, count=1) for k in boxes]  # isolate the box rule
+        return reply
+    vision = FakeVision({"cat": [(0.8, [0.06, 0.5, 0.3, 0.95])], "dog": [(0.8, [0.37, 0.4, 0.63, 0.95])],
+                         "rabbit": [(0.6, [0.02, 0.11, 0.94, 0.88])]})
+    image = tmp_path / "img.png"
+    Image.new("RGB", (64, 64)).save(image)
+    report = VerificationAgent(FakeLLM({"VlmVerdicts": answer}), vision, settings).run(
+        spec, build_checks(spec), image, 1, tmp_path)
+    r = {x.check_id: x for x in report.results}
+    assert r["rabbit.presence"].status == Status.failed
+    assert r["cat.presence"].status == Status.passed and r["dog.presence"].status == Status.passed

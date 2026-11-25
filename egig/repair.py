@@ -26,6 +26,7 @@ class Limits:
     ip_max: float = 0.9
     control_min: float = 0.2
     control_max: float = 0.9
+    ip_max_step: float = 0.15  # largest net change of one entity's ip_scale in one round
     max_extra_prompt: int = 6
     max_extra_negative: int = 6
 
@@ -51,8 +52,17 @@ def repair(params: GenParams, report: AttemptReport, spec: ConstraintSpec, limit
     new.seed = params.seed + 1
     new.notes.append(f"seed {params.seed} -> {new.seed} (new random start)")
 
+    missing = {eid for eid, n in report.vlm_counts.items() if n == 0}  # Gemini sees none of them
+
     def bump_ip(entity_id: str, delta: float, reason: str) -> None:
         if entity_id not in new.ip_scale:
+            return
+        if delta > 0 and entity_id in missing:
+            # cat + dog + rabbit run: the rabbit was missing and its ip_scale kept rising (0.60 -> 0.80),
+            # which pressed rabbit fur onto the other animals. A stronger reference does not make a
+            # missing entity appear; the prompt and emphasis rules below are what can.
+            new.notes.append(f"ip_scale[{entity_id}] not raised ({reason}): Gemini counted 0, "
+                             f"a stronger reference cannot make it appear")
             return
         old = new.ip_scale[entity_id]
         new.ip_scale[entity_id] = _clip(old + delta, limits.ip_min, limits.ip_max)
@@ -81,6 +91,9 @@ def repair(params: GenParams, report: AttemptReport, spec: ConstraintSpec, limit
             emphasize(e.id, why)
             bump_ip(e.id, +0.10, why)
             prompt(f"a clearly visible {e.name}", why)
+        elif r.kind == CheckKind.count and e and e.count == 1:
+            prompt(f"a single {e.detection_label}", why)
+            _add(new.extra_negative, f"two {e.detection_label}s", limits.max_extra_negative)
         elif r.kind == CheckKind.count and e:
             emphasize(e.id, why)
             prompt(f"exactly {e.count} {e.detection_label}s", why)
@@ -107,7 +120,24 @@ def repair(params: GenParams, report: AttemptReport, spec: ConstraintSpec, limit
             prompt(r.description.split(":", 1)[-1].strip(), why)
         elif r.kind == CheckKind.relation:
             prompt(r.description.split(":", 1)[-1].strip(), why)
+        elif r.kind == CheckKind.integrity:
+            # frames / panels come from hard-edged conditioning: follow the edges less, forbid frames
+            bump_control(-0.15, why + ": reference edges can turn into a frame or panel")
+            for neg in ("picture frame", "border", "poster", "collage"):
+                _add(new.extra_negative, neg, limits.max_extra_negative)
+            new.notes.append(f"negative += picture frame, border, poster, collage ({why})")
         # r.fix_hint (Gemini's free-text advice) is NOT pasted into the prompt: it is a full sentence
         # that got cut mid-way by the 75-token limit and repeated what the rules above already add.
         # It stays in the report for people to read.
+
+    # Several failed checks of one entity add up (identity +0.15, four features +0.05 each = +0.35).
+    # Cap the net change per round so one bad image cannot swing a reference to the limit.
+    for eid, before in params.ip_scale.items():
+        after = new.ip_scale.get(eid, before)
+        capped = _clip(min(max(after, before - limits.ip_max_step), before + limits.ip_max_step),
+                       limits.ip_min, limits.ip_max)
+        if capped != after:
+            new.ip_scale[eid] = capped
+            new.notes.append(f"ip_scale[{eid}] {after:.2f} -> {capped:.2f} (net change per round capped at "
+                             f"±{limits.ip_max_step:.2f} from {before:.2f})")
     return new

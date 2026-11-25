@@ -11,6 +11,7 @@ verifier, and compare the system's verdicts with human labels.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import shutil
 import time
@@ -209,6 +210,12 @@ def load_run(run_dir: Path, reports_dir: Optional[Path] = None) -> SavedRun:
     return run
 
 
+def image_sig(path: Path) -> str:
+    """Short fingerprint of an image file: a label belongs to these exact pixels. When a prompt is
+    run again, its attempt_1/image.png is a new picture and the old label must not carry over."""
+    return hashlib.md5(Path(path).read_bytes()).hexdigest()[:10]
+
+
 def attempt_numbers(run_dir: Path) -> List[int]:
     n, out = 1, []
     while (Path(run_dir) / f"attempt_{n}" / "image.png").exists():
@@ -258,8 +265,12 @@ class ReplayVerifier(VerificationAgent):
         return super()._ask_vlm(spec, checks, image, crops)
 
 
-def reverify_run(run_dir: Path, out_dir: Path, verifier: ReplayVerifier, saved_checks: bool = False) -> SavedRun:
-    """Check every saved attempt image of one run again; write out_dir/attempt_<n>/report.json."""
+def reverify_run(run_dir: Path, out_dir: Path, verifier: ReplayVerifier, saved_checks: bool = False,
+                 resume: bool = False) -> SavedRun:
+    """Check every saved attempt image of one run again; write out_dir/attempt_<n>/report.json.
+
+    resume=True keeps a report already in out_dir when Gemini answered it (no vlm_error) and it is
+    newer than the image, so a run stopped by a Gemini outage only redoes what is missing."""
     old = load_run(run_dir)
     if saved_checks:
         raw = json.loads((Path(run_dir) / "03_checks.json").read_text(encoding="utf-8"))
@@ -270,6 +281,12 @@ def reverify_run(run_dir: Path, out_dir: Path, verifier: ReplayVerifier, saved_c
     for n in attempt_numbers(run_dir):
         attempt_dir = Path(out_dir) / f"attempt_{n}"
         attempt_dir.mkdir(parents=True, exist_ok=True)
+        done = attempt_dir / "report.json"
+        if resume and done.exists() and done.stat().st_mtime > old.image(n).stat().st_mtime:
+            kept = AttemptReport.model_validate_json(done.read_text(encoding="utf-8"))
+            if not kept.vlm_error:
+                new.reports.append(kept)
+                continue
         verifier.saved = old.reports[n - 1] if n <= len(old.reports) else None
         report = verifier.run(old.spec, checks, old.image(n), n, attempt_dir)
         if verifier.saved is not None:
@@ -303,10 +320,11 @@ class Label:
     tags: List[str] = field(default_factory=list)
     note: str = ""
     labeler: str = ""
+    image: str = ""  # image_sig() of the picture that was judged ("" in old files)
 
 
 def read_labels(paths: Iterable[Path]) -> Dict[tuple, Label]:
-    """labels.csv files from review.html: run_id, attempt, human (ok|wrong), tags (a;b), note, labeler.
+    """labels.csv files from review.html: run_id, attempt, human (ok|wrong), tags (a;b), note, labeler, image.
     Several files can be merged; a later file wins for the same image."""
     labels: Dict[tuple, Label] = {}
     for path in paths:
@@ -317,7 +335,8 @@ def read_labels(paths: Iterable[Path]) -> Dict[tuple, Label]:
                     continue  # not labelled yet
                 tags = [t.strip() for t in (r.get("tags") or "").split(";") if t.strip()]
                 lab = Label(r["run_id"].strip(), int(r["attempt"]), human == "ok", tags,
-                            (r.get("note") or "").strip(), (r.get("labeler") or "").strip())
+                            (r.get("note") or "").strip(), (r.get("labeler") or "").strip(),
+                            (r.get("image") or "").strip())
                 labels[(lab.run_id, lab.attempt)] = lab
     return labels
 
@@ -372,9 +391,13 @@ def compare(runs: Sequence[SavedRun], labels: Dict[tuple, Label], max_attempts: 
         if not run.reports:
             continue
         loop = replay_loop(run.reports, max_attempts)
-        attempts = [AttemptRow(run.id, n, r.verdict.passed, bool(r.vlm_error), labels.get((run.id, n)),
-                               [f"{c.kind.value}:{c.check_id}" for c in r.failed()])
-                    for n, r in enumerate(run.reports, 1)]
+        attempts = []
+        for n, r in enumerate(run.reports, 1):
+            label = labels.get((run.id, n))
+            if label is not None and label.image and run.image(n).exists() and label.image != image_sig(run.image(n)):
+                label = None  # judged a different picture (the prompt was run again): not valid here
+            attempts.append(AttemptRow(run.id, n, r.verdict.passed, bool(r.vlm_error), label,
+                                       [f"{c.kind.value}:{c.check_id}" for c in r.failed()]))
         rows.append(RunRow(run.id, run.prompt, str(loop["status"]), int(loop["best_index"]) + 1,
                            bool(loop["incomplete"]), attempts))
     return rows
