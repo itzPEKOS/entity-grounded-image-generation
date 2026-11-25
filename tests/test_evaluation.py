@@ -101,6 +101,16 @@ def test_batch_waits_longer_when_gemini_seems_down(tmp_path):
     assert waits == [1, 1, 1, 99]
 
 
+def test_generator_only_batch_keeps_not_verified_images(tmp_path):
+    # max_attempts=1: the picture is what is tested; Gemini being down only means it is verified later
+    orch = FakeOrch(tmp_path, {"a": ["notverified"], "b": ["fail"]})
+    waits = []
+    rows = run_batch(orch, prompts("a", "b"), sleep=waits.append, rerun_not_verified=False)
+    rows = run_batch(orch, prompts("a", "b"), sleep=waits.append, rerun_not_verified=False)  # same cell again
+    assert orch.calls == ["a", "b"] and waits == []  # no retry, nothing generated twice
+    assert rows["a"]["status"] == "NOT_VERIFIED"
+
+
 # ----------------------------------------------------------------- replaying the loop
 def test_replay_loop_stops_like_the_pipeline():
     assert replay_loop([report(True), report(False)], 3) == {"best_index": 0, "status": "PASS", "used": 1,

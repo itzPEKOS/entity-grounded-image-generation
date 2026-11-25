@@ -91,11 +91,14 @@ def _free_gpu_memory() -> None:
 
 def run_batch(orch, prompts: Sequence[EvalPrompt], subdir: str = "eval", summary_name: str = "summary.csv",
               commit: str = "", retry_wait_s: float = 120, outage_wait_s: float = 600,
-              max_consecutive_errors: int = 3, sleep: Callable[[float], None] = time.sleep) -> Dict[str, Dict[str, str]]:
+              max_consecutive_errors: int = 3, sleep: Callable[[float], None] = time.sleep,
+              rerun_not_verified: bool = True) -> Dict[str, Dict[str, str]]:
     """Run every prompt; one failing prompt never stops the batch.
 
     - each prompt is tried twice: an exception or a NOT_VERIFIED result (Gemini down) waits
       `retry_wait_s` and runs it again; a second failure is recorded and the batch moves on
+    - `rerun_not_verified=False` (generator-only runs, max_attempts=1): the image is what is being
+      tested and it is verified later on the laptop, so NOT_VERIFIED counts as done, not as a failure
     - `max_consecutive_errors` prompts in a row failing means Gemini is probably down: wait `outage_wait_s`
     - summary.csv is rewritten after every prompt, so a crash or a stopped session keeps what is done
     - running the same cell again skips prompts whose summary row is already PASS or FAIL
@@ -104,7 +107,8 @@ def run_batch(orch, prompts: Sequence[EvalPrompt], subdir: str = "eval", summary
     summary_path = out_dir / summary_name
     rows = read_summary(summary_path)
     consecutive_errors = 0
-    todo = [p for p in prompts if rows.get(p.id, {}).get("status") not in DONE]
+    done = DONE if rerun_not_verified else DONE + ("NOT_VERIFIED",)
+    todo = [p for p in prompts if rows.get(p.id, {}).get("status") not in done]
     print(f"[batch] {len(prompts)} prompts, {len(prompts) - len(todo)} already done, {len(todo)} to run "
           f"-> {out_dir}")
 
@@ -131,7 +135,7 @@ def run_batch(orch, prompts: Sequence[EvalPrompt], subdir: str = "eval", summary
                 row = _row(p, commit, status="ERROR", seconds=f"{time.monotonic() - started:.0f}",
                            error=f"{type(err).__name__}: {err}"[:300])
                 _free_gpu_memory()
-            if row["status"] in DONE:
+            if row["status"] in done:
                 break
             if attempt == 1:
                 print(f"[batch] {p.id}: {row['status']} -> waiting {retry_wait_s:.0f}s, then trying once more")
@@ -141,7 +145,7 @@ def run_batch(orch, prompts: Sequence[EvalPrompt], subdir: str = "eval", summary
         write_summary(summary_path, rows)
         print(f"[batch] {n}/{len(todo)} {p.id}: {row['status']} ({row['seconds']}s)")
 
-        consecutive_errors = consecutive_errors + 1 if row["status"] not in DONE else 0
+        consecutive_errors = consecutive_errors + 1 if row["status"] not in done else 0
         if consecutive_errors >= max_consecutive_errors and n < len(todo):
             print(f"[batch] {consecutive_errors} prompts in a row failed: Gemini is probably down, "
                   f"waiting {outage_wait_s:.0f}s")
@@ -150,7 +154,7 @@ def run_batch(orch, prompts: Sequence[EvalPrompt], subdir: str = "eval", summary
 
     counts = {s: sum(1 for r in rows.values() if r["status"] == s) for s in ("PASS", "FAIL", "NOT_VERIFIED", "ERROR")}
     print(f"[batch] finished: {counts}")
-    rerun = [r["id"] for r in rows.values() if r["status"] not in DONE]
+    rerun = [r["id"] for r in rows.values() if r["status"] not in done]
     if rerun:
         print(f"[batch] run again later (same cell, or ONLY = {rerun})")
     return rows
@@ -303,6 +307,7 @@ TAGS = {  # what a person can say is wrong with an image
     "count": "wrong number of things",
     "missing": "an entity is missing",
     "merged": "animals merged / deformed body",
+    "frame": "picture frame, poster, panel or collage that was not asked for",
     "attribute": "wrong pose, action, colour or size",
     "position": "wrong left/right/top/bottom placement",
     "relation": "relation between entities is wrong",
