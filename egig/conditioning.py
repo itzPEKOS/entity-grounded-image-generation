@@ -18,7 +18,7 @@ from typing import Dict, Iterable, Optional, Tuple
 import numpy as np
 from PIL import Image, ImageDraw
 
-from .geometry import intersection, area, to_pixels
+from .geometry import area, center, intersection, to_pixels
 from .schemas import EntitySpec
 
 
@@ -35,12 +35,33 @@ def layer_masks(entities: Iterable[EntitySpec], width: int, height: int) -> Dict
         draw = ImageDraw.Draw(mask)
         draw.rectangle(to_pixels(e.box, width, height), fill=255)
         for other in entities:
-            if other is not e and other.layer > e.layer and area(intersection(e.box, other.box)) > 0:
+            if other is e or area(intersection(e.box, other.box)) <= 0:
+                continue
+            if other.layer > e.layer:  # in front: hides this entity
                 draw.rectangle(to_pixels(other.box, width, height), fill=0)
+            elif other.layer == e.layer:  # side by side: split the overlap, each keeps its own half
+                half = _overlap_half_of_other(e.box, other.box)
+                if half is not None:
+                    draw.rectangle(to_pixels(half, width, height), fill=0)
         if mask.getbbox() is None:  # completely hidden: fall back to the full box
             ImageDraw.Draw(mask).rectangle(to_pixels(e.box, width, height), fill=255)
         masks[e.id] = mask
     return masks
+
+
+def _overlap_half_of_other(box, other) -> Optional[Tuple[float, float, float, float]]:
+    """Two entities on the same layer whose boxes overlap (cat 0.15-0.42 next to dog 0.38-0.75):
+    without this, both reference photos act on the overlap and their fur mixes. Cut the overlap
+    down its middle, across its narrow side; return the half that belongs to `other`."""
+    ix0, iy0, ix1, iy1 = intersection(box, other)
+    (cx, cy), (ox, oy) = center(box), center(other)
+    if (ix1 - ix0) <= (iy1 - iy0) and cx != ox:  # side by side: split left / right
+        mid = (ix0 + ix1) / 2
+        return (mid, iy0, ix1, iy1) if cx < ox else (ix0, iy0, mid, iy1)
+    if cy != oy:  # one above the other: split top / bottom
+        mid = (iy0 + iy1) / 2
+        return (ix0, mid, ix1, iy1) if cy < oy else (ix0, iy0, ix1, mid)
+    return None  # same centre: no side to give away
 
 
 def fit_into_box(img: Image.Image, box_px: Tuple[int, int, int, int], align: str = "bottom") -> Tuple[Image.Image, Tuple[int, int]]:

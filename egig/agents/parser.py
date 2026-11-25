@@ -35,7 +35,9 @@ Layout
 - box = [x0, y0, x1, y1], normalized 0..1, origin at the top-left. Each box at least 0.2 wide and 0.2 tall.
 - Background landmarks/buildings: large, upper-middle, layer 0, e.g. [0.10, 0.05, 0.90, 0.75].
 - Foreground subjects (animals, people): lower part, in front, layer 2, e.g. [0.30, 0.45, 0.70, 0.98].
-- Respect explicit positions ("on the left" -> x in 0..0.5). Avoid overlapping foreground boxes.
+- Respect explicit positions ("on the left" -> x in 0..0.5).
+- Entities on the same layer must not overlap: leave a gap of at least 0.05 between their boxes, e.g. three
+  animals side by side: [0.04, 0.45, 0.31, 0.95], [0.36, 0.45, 0.64, 0.95], [0.69, 0.45, 0.96, 0.95].
 
 Scene
 - setting: where it happens. style: "photorealistic" unless the user asked for another style.

@@ -253,3 +253,39 @@ def test_one_asked_for_but_gemini_counts_two(parsed_query, settings, tmp_path):
 def test_framed_picture_fails_the_image(parsed_query, settings, tmp_path):
     report, r = verify_one(parsed_query, settings, tmp_path, vlm_answer(fail=("image.integrity",)))
     assert r["image.integrity"].status == Status.failed and not report.verdict.passed
+
+
+def test_presence_fails_when_gemini_counts_zero(parsed_query, settings, tmp_path):
+    # the detector put a box on "dog", but Gemini sees no dog (merged into another animal)
+    def answer(parts):
+        reply = vlm_answer()(parts)
+        reply.counts = [VlmCount(entity_id="shiba_inu", count=0), VlmCount(entity_id="wat_arun", count=1)]
+        return reply
+    report, r = verify_one(parsed_query, settings, tmp_path, answer)
+    assert r["shiba_inu.presence"].status == Status.failed
+    assert r["shiba_inu.presence"].evidence.startswith("Gemini counted 0; detector found 'dog'")
+    assert r["wat_arun.presence"].status == Status.passed and not report.verdict.passed
+
+
+def test_box_around_several_animals_does_not_prove_one_of_them(parsed_query, settings, tmp_path):
+    # cat + dog + rabbit run: "rabbit" was found as one box around the whole merged creature
+    spec = spec_with_profiles(parsed_query)
+    template = spec.entity("shiba_inu")
+    boxes = {"cat": [0.05, 0.45, 0.31, 0.95], "dog": [0.36, 0.45, 0.64, 0.95], "rabbit": [0.69, 0.45, 0.95, 0.95]}
+    spec.entities = [template.model_copy(update={"id": k, "name": k, "detection_label": k, "box": b})
+                     for k, b in boxes.items()]
+    spec.relations = []
+
+    def answer(parts):
+        reply = vlm_answer()(parts)
+        reply.counts = [VlmCount(entity_id=k, count=1) for k in boxes]  # isolate the box rule
+        return reply
+    vision = FakeVision({"cat": [(0.8, [0.06, 0.5, 0.3, 0.95])], "dog": [(0.8, [0.37, 0.4, 0.63, 0.95])],
+                         "rabbit": [(0.6, [0.02, 0.11, 0.94, 0.88])]})
+    image = tmp_path / "img.png"
+    Image.new("RGB", (64, 64)).save(image)
+    report = VerificationAgent(FakeLLM({"VlmVerdicts": answer}), vision, settings).run(
+        spec, build_checks(spec), image, 1, tmp_path)
+    r = {x.check_id: x for x in report.results}
+    assert r["rabbit.presence"].status == Status.failed
+    assert r["cat.presence"].status == Status.passed and r["dog.presence"].status == Status.passed

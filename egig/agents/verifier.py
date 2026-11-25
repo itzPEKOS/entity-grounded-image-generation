@@ -147,6 +147,24 @@ def drop_group_boxes(dets: List[RawDetection], inside: float = 0.85) -> List[Raw
     return keep
 
 
+def drop_boxes_spanning_others(entities: List[EntitySpec],
+                               assigned: Dict[str, List[RawDetection]]) -> Dict[str, List[RawDetection]]:
+    """Cat + dog + rabbit run: the animals merged into one creature and the detector put the same
+    big box around it for "cat", "dog" and "rabbit", so every presence check passed while the
+    rabbit was gone. A box for a non-rigid entity that also covers the planned centres of two or
+    more other entities on its layer is a box around a group, not around this entity: ignore it.
+    (Rigid entities keep theirs: a temple legitimately spans the whole picture.)"""
+    out: Dict[str, List[RawDetection]] = {}
+    for e in entities:
+        others = [center(o.box) for o in entities if o is not e and o.layer == e.layer]
+        if e.rigid or len(others) < 2:
+            out[e.id] = assigned.get(e.id, [])
+            continue
+        out[e.id] = [d for d in assigned.get(e.id, [])
+                     if sum(contains_point(d.box, c) for c in others) < 2]
+    return out
+
+
 def assign_detections(entities: List[EntitySpec], raw: Dict[str, List[RawDetection]]) -> Dict[str, List[RawDetection]]:
     """Entities can share a detector label (two dogs). Give each detection to the entity
     whose planned box overlaps it most (ties: nearest planned centre)."""
@@ -199,8 +217,8 @@ class VerificationAgent:
                 dets = self.vision.detect(image, label, box_threshold=self.s.box_threshold_low)
                 raw_loose[label] = drop_group_boxes(dets) if n > 1 else dets
             raw_sure = {label: [d for d in dets if d.score >= self.s.box_threshold] for label, dets in raw_loose.items()}
-            sure = assign_detections(spec.entities, raw_sure)
-            loose = assign_detections(spec.entities, raw_loose)
+            sure = drop_boxes_spanning_others(spec.entities, assign_detections(spec.entities, raw_sure))
+            loose = drop_boxes_spanning_others(spec.entities, assign_detections(spec.entities, raw_loose))
             for e in spec.entities:
                 for d in loose[e.id]:
                     detections.append(Detection(entity_id=e.id, label=d.label, score=round(d.score, 3),
@@ -248,6 +266,14 @@ class VerificationAgent:
         assert e is not None
         hi, lo = self.s.box_threshold, self.s.box_threshold_low
         if c.kind == CheckKind.presence:
+            if vlm_counts.get(e.id) == 0:
+                # second opinion: Gemini looked for this entity and saw none (merged or missing animal),
+                # so a detector box (often one box around a merged creature) does not prove it is there
+                found = sure[e.id] or loose[e.id]
+                detector = f"detector found '{e.detection_label}' (score {found[0].score:.2f})" if found \
+                    else f"detector found no '{e.detection_label}'"
+                return CheckResult.of(c, Status.failed, f"Gemini counted 0; {detector}",
+                                      fix_hint=f"make the {e.name} clearly visible")
             if sure[e.id]:
                 d = sure[e.id][0]
                 return CheckResult.of(c, Status.passed, f"found '{e.detection_label}' (score {d.score:.2f})",

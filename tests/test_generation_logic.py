@@ -160,3 +160,39 @@ def test_frame_failure_lowers_control_and_forbids_frames(parsed_query):
         skipped=0, explanation=""))
     new = repair(GenParams(seed=1, control_scale=0.5), report, spec)
     assert new.control_scale == 0.35 and "picture frame" in new.extra_negative
+
+
+# ------------------------------------------- multi-animal fixes (cat + dog + rabbit run, 24 Nov)
+def _animal(eid, box):
+    from egig.schemas import Category, EntitySpec
+    return EntitySpec(id=eid, name=eid, category=Category.animal, search_query=eid, detection_label=eid,
+                      count=1, attributes=[], box=box, layer=2, needs_reference=True, rigid=False)
+
+
+def test_missing_entity_does_not_get_a_stronger_reference(parsed_query):
+    spec = grounded_spec(parsed_query)
+    rep = report_with(("shiba_inu.identity", "shiba_inu", CheckKind.identity, "Shiba Inu: recognizably", ""),
+                      ("shiba_inu.feat1", "shiba_inu", CheckKind.feature, "Shiba Inu: curled tail", ""))
+    rep.vlm_counts = {"shiba_inu": 0}  # Gemini sees no Shiba at all
+    new = repair(GenParams(seed=1, ip_scale={"shiba_inu": 0.6}), rep, spec)
+    assert new.ip_scale["shiba_inu"] == 0.6  # was 0.60 + 0.15 + 0.05 = 0.80 before the fix
+    assert any("not raised" in n for n in new.notes)
+    assert "Shiba Inu with curled tail" in new.extra_prompt  # the prompt still asks for it
+
+
+def test_ip_scale_net_change_per_round_is_capped(parsed_query):
+    spec = grounded_spec(parsed_query)
+    rep = report_with(("shiba_inu.identity", "shiba_inu", CheckKind.identity, "Shiba Inu: recognizably", ""),
+                      *[(f"shiba_inu.feat{i}", "shiba_inu", CheckKind.feature, f"Shiba Inu: f{i}", "")
+                        for i in (1, 2, 3)])
+    new = repair(GenParams(seed=1, ip_scale={"shiba_inu": 0.6}), rep, spec)
+    assert new.ip_scale["shiba_inu"] == 0.75  # 0.60 + 0.15 + 3 x 0.05 = 0.90, capped at 0.60 + 0.15
+    assert any("capped" in n for n in new.notes)
+
+
+def test_same_layer_overlap_is_split_between_the_two_masks():
+    cat, dog = _animal("cat", [0.1, 0.4, 0.5, 0.9]), _animal("dog", [0.4, 0.4, 0.9, 0.9])
+    masks = layer_masks([cat, dog], 200, 200)  # overlap x 0.40-0.50, split at 0.45 = 90 px
+    assert masks["cat"].getpixel((85, 130)) == 255 and masks["cat"].getpixel((95, 130)) == 0
+    assert masks["dog"].getpixel((85, 130)) == 0 and masks["dog"].getpixel((95, 130)) == 255
+    assert masks["cat"].getpixel((40, 130)) == 255 and masks["dog"].getpixel((160, 130)) == 255
